@@ -22,21 +22,32 @@ object MovieLibrary {
     @Volatile
     private var refreshing = false
 
-    /** Display names for tab-completion: keys minus their extension. */
+    private val SUBTITLE_EXTENSIONS = setOf("srt")
+
+    fun isSubtitle(key: String): Boolean =
+        key.substringAfterLast('.', "").lowercase() in SUBTITLE_EXTENSIONS
+
+    /** Display names for tab-completion: video keys minus their extension. */
     fun suggestions(): List<String> {
         refreshSoon()
-        return cachedKeys.map(::displayName).distinct()
+        return cachedKeys.filterNot(::isSubtitle).map(::displayName).distinct()
     }
 
     /**
-     * Resolves a staff-typed name to an object key. Blocking (may hit R2);
-     * call off the server thread. Matches the exact key first, then the key's
-     * extension-less name, case-insensitively.
+     * Resolves a staff-typed name to a video object key. Blocking (may hit
+     * R2); call off the server thread. Matches the exact key first, then the
+     * key's extension-less name, case-insensitively.
      */
     fun resolve(name: String): String? {
-        val keys = freshKeys()
+        val keys = freshKeys().filterNot(::isSubtitle)
         keys.firstOrNull { it.equals(name, ignoreCase = true) }?.let { return it }
         return keys.firstOrNull { displayName(it).equals(name, ignoreCase = true) }
+    }
+
+    /** Sidecar subtitles: an .srt sharing the video's extension-less name. */
+    fun subtitleKeyFor(videoKey: String): String? {
+        val base = displayName(videoKey)
+        return freshKeys().firstOrNull { isSubtitle(it) && displayName(it).equals(base, ignoreCase = true) }
     }
 
     fun displayName(key: String): String = key.substringBeforeLast('.')

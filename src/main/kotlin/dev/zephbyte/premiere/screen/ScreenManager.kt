@@ -21,6 +21,10 @@ import java.nio.file.Path
 
 class ManagedScreen(val definition: ScreenDefinition) {
     val playback = Playback()
+
+    /** Who ran /movienight load, for the "it's buffered" ping. */
+    var loaderUuid: java.util.UUID? = null
+    var readyNotified = false
 }
 
 /**
@@ -51,7 +55,10 @@ object ScreenManager {
             if (++tickCounter >= REBROADCAST_TICKS) {
                 tickCounter = 0
                 screens.values.filter { it.playback.state == PlayState.PLAYING }
-                    .forEach { broadcast(server, it) }
+                    .forEach { screen ->
+                        broadcast(server, screen)
+                        AudioBridge.instance?.onSyncCheck(server, screen.definition, screen.playback)
+                    }
             }
         }
     }
@@ -78,9 +85,53 @@ object ScreenManager {
         return true
     }
 
-    fun play(server: MinecraftServer, screen: ManagedScreen, url: String, label: String = url) {
-        screen.playback.play(url, label)
+    fun play(
+        server: MinecraftServer,
+        screen: ManagedScreen,
+        url: String,
+        label: String = url,
+        subtitleUrl: String = "",
+        audioLanguage: String = "",
+    ) {
+        screen.playback.play(url, label, subtitleUrl, audioLanguage)
         pushPlayback(server, screen)
+    }
+
+    fun load(
+        server: MinecraftServer,
+        screen: ManagedScreen,
+        url: String,
+        label: String,
+        subtitleUrl: String,
+        audioLanguage: String,
+        loader: ServerPlayer?,
+    ) {
+        screen.playback.load(url, label, subtitleUrl, audioLanguage)
+        screen.loaderUuid = loader?.uuid
+        screen.readyNotified = false
+        pushPlayback(server, screen)
+    }
+
+    /** Starts a LOADED screen (or resumes a PAUSED one). */
+    fun start(server: MinecraftServer, screen: ManagedScreen) {
+        screen.playback.resume()
+        pushPlayback(server, screen)
+    }
+
+    /** A video client decoded its first frame of a LOADED screen. */
+    fun clientReportedReady(screenName: String, reporter: ServerPlayer) {
+        val screen = screens[screenName] ?: return
+        if (screen.playback.state != PlayState.LOADED || screen.readyNotified) return
+        screen.readyNotified = true
+        val loader = screen.loaderUuid?.let { uuid -> server?.playerList?.getPlayer(uuid) }
+        val message = net.minecraft.network.chat.Component.literal(
+            "'${screen.playback.label}' is buffered on ${reporter.gameProfile.name}'s client — /movienight play $screenName to roll."
+        )
+        if (loader != null) {
+            loader.sendSystemMessage(message)
+        } else {
+            Premiere.LOGGER.info("Screen '{}' buffered on {}'s client", screenName, reporter.gameProfile.name)
+        }
     }
 
     /** Returns true if now playing, false if now paused. */
@@ -167,6 +218,7 @@ object ScreenManager {
         return ScreenStatePayload(
             screen = screen.definition,
             url = playback.url,
+            subtitleUrl = playback.subtitleUrl,
             state = playback.state,
             mediaPositionMs = playback.currentPositionMs(),
             volume = playback.volume,

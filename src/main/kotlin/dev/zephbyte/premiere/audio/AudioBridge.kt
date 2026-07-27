@@ -13,6 +13,14 @@ import net.minecraft.server.MinecraftServer
  */
 interface AudioBridge {
     fun onPlaybackChanged(server: MinecraftServer, screen: ScreenDefinition, playback: Playback)
+
+    /**
+     * Periodic drift audit: compares where the soundtrack actually is against
+     * the master clock and rebuilds the session if they've truly diverged.
+     * The audio path is otherwise open-loop, so this is its correction ping.
+     */
+    fun onSyncCheck(server: MinecraftServer, screen: ScreenDefinition, playback: Playback) {}
+
     fun onScreenRemoved(screenName: String)
     fun shutdownAll()
 

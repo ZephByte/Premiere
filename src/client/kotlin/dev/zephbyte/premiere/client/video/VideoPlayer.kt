@@ -22,7 +22,11 @@ import kotlin.math.min
  * is tolerated, being slightly ahead just waits, and anything past
  * [HARD_SEEK_MS] hard-seeks the demuxer instead of creeping.
  */
-class VideoPlayer(screenName: String, val url: String) : AutoCloseable {
+class VideoPlayer(
+    screenName: String,
+    val url: String,
+    private val onFirstFrame: (() -> Unit)? = null,
+) : AutoCloseable {
 
     companion object {
         private const val DROP_BEHIND_MS = 100L
@@ -83,6 +87,25 @@ class VideoPlayer(screenName: String, val url: String) : AutoCloseable {
     private fun targetMediaMs(): Long =
         if (playing) anchorMediaMs + (System.currentTimeMillis() - anchorLocalMs) else anchorMediaMs
 
+    /** Master-clock media position; also drives the subtitle overlay. */
+    fun currentMediaMs(): Long = targetMediaMs().coerceAtLeast(0)
+
+    // Embedded text subtitles, collected as their packets stream in alongside
+    // the video. Keyed by start time: naturally sorted, and re-decoded packets
+    // after a hard seek simply overwrite themselves.
+    private val embeddedCues =
+        java.util.concurrent.ConcurrentSkipListMap<Long, dev.zephbyte.premiere.client.subtitles.SubtitleCue>()
+
+    @Volatile
+    private var hasSubtitleTrack = false
+
+    fun hasEmbeddedSubtitles(): Boolean = hasSubtitleTrack
+
+    fun activeEmbeddedCue(positionMs: Long): dev.zephbyte.premiere.client.subtitles.SubtitleCue? {
+        val entry = embeddedCues.floorEntry(positionMs) ?: return null
+        return if (positionMs < entry.value.endMs) entry.value else null
+    }
+
     private fun decodeLoop() {
         MediaUrls.validateResolved(url)?.let { error ->
             Premiere.LOGGER.warn("Not playing '{}': {}", url, error)
@@ -94,6 +117,8 @@ class VideoPlayer(screenName: String, val url: String) : AutoCloseable {
                 pixelFormat = avutil.AV_PIX_FMT_RGBA
                 start()
             }
+            val subtitleTrack = dev.zephbyte.premiere.client.subtitles.EmbeddedSubtitles.pickTrack(grabber)
+            hasSubtitleTrack = subtitleTrack != null
             val durationMs = grabber.lengthInTime / 1000
             var lastTsMs = 0L
             while (running) {
@@ -115,13 +140,22 @@ class VideoPlayer(screenName: String, val url: String) : AutoCloseable {
                 if (abs(lastTsMs - target) > HARD_SEEK_MS) {
                     grabber.setTimestamp(target * 1000, true)
                 }
-                val frame = grabber.grabImage()
+                // doData=true also surfaces subtitle packets from the same stream.
+                val frame = grabber.grabFrame(false, true, true, false, subtitleTrack != null)
                 if (frame == null) {
                     // EOF (or a demuxer hiccup): wait for a restart/seek
                     // instead of dying with the last frame frozen on screen.
                     Thread.sleep(200)
                     continue
                 }
+                if (frame.data != null) {
+                    if (subtitleTrack != null) {
+                        dev.zephbyte.premiere.client.subtitles.EmbeddedSubtitles.parsePacket(frame, subtitleTrack)
+                            ?.let { cue -> embeddedCues[cue.startMs] = cue }
+                    }
+                    continue
+                }
+                if (frame.image == null) continue
                 lastTsMs = frame.timestamp / 1000
                 if (lastTsMs < target - DROP_BEHIND_MS) continue // behind: drop
                 if (lastTsMs > target) {
@@ -140,7 +174,13 @@ class VideoPlayer(screenName: String, val url: String) : AutoCloseable {
 
     private fun hasFrame(): Boolean = synchronized(frameLock) { frameBytes != null }
 
+    private var firstFrameReported = false
+
     private fun publish(frame: org.bytedeco.javacv.Frame) {
+        if (!firstFrameReported) {
+            firstFrameReported = true
+            onFirstFrame?.invoke()
+        }
         val src = frame.image[0] as ByteBuffer
         val width = frame.imageWidth
         val height = frame.imageHeight

@@ -75,6 +75,26 @@ Because names are the interface, the library doubles as a pre-roll shelf:
 keep small non-copyrighted clips around (community ads, intro jokes,
 "silence your phones" bumpers) and play them by name before the feature.
 
+**Subtitles:** players with the client mod toggle them with a keybind
+(default **K**, rebindable in Controls); cues render at the bottom of their
+screen, synced to the master clock, whenever they're near the playing
+screen. Two sources, in priority order:
+
+1. A sidecar `.srt` uploaded with the same name as the movie (`bunny.mp4` +
+   `bunny.srt`) — paired automatically; `/movienight movies` marks such
+   films with `(cc)`. For pasted URLs the server checks for an `.srt` next
+   to the video.
+2. **Text subtitle tracks embedded in the file itself** (SRT/ASS in MKV,
+   mov_text in MP4) — streamed out of the same connection as the picture,
+   nothing to upload at all. Releases often carry many tracks; the client
+   picks the best full track in its preferred language (default `eng`,
+   changeable via `subtitle_language` in `config/premiere-client.json`),
+   avoiding "forced" tracks (foreign-dialogue-only) and preferring non-SDH.
+
+The one case needing the sidecar route: Blu-ray-style *bitmap* subtitles
+(PGS/VobSub) are images, not text, and are ignored — OCR them to an `.srt`
+with Subtitle Edit, or grab one from opensubtitles.org.
+
 **Security model:** the bucket has **no public access at all** — no r2.dev
 subdomain, nothing to discover, nothing for strangers to hotlink. Playback
 links die on their own within hours. (R2 egress is also free, so even a
@@ -148,7 +168,9 @@ All gated behind `movienight.control` (or op level 2) except `list`.
 ```
 /movienight define <screen> <corner1> <corner2>   capture a wall as a screen
 /movienight undefine <screen>                     remove a screen
-/movienight play <screen> <movie|url>             start from the beginning (names tab-complete)
+/movienight load <screen> <movie|url>             pre-buffer; you get a ping when it's ready
+/movienight play <screen>                         roll a loaded film (or resume a paused one)
+/movienight play <screen> <movie|url>             load and start immediately
 /movienight pause <screen>                        pause / resume (toggle)
 /movienight stop <screen>                         stop and clear
 /movienight volume <screen> <0-100>               audio volume at the source
@@ -174,6 +196,27 @@ position to video clients, who chase it: small drift is tolerated, sustained
 drift over ~2.5s hard-seeks. Late joiners request the current state on join
 and land at the right timestamp. Pause, resume, and seek all flow from the
 same server-side playback record.
+
+The audio side has its own correction loop: every 10 seconds the server
+compares where the soundtrack actually is (frames fed × 20ms) against the
+master clock and rebuilds the audio session if they diverge past ~750ms.
+Pause keeps the audio decoder and its buffer alive, so resume is instant and
+position-exact rather than a reconnect.
+
+**Multi-audio films** (dual-audio anime, etc.): the room hears one shared
+track, chosen server-side. Set a server-wide preference with
+`audio_language` in `config/premiere.json` ("eng", "jpn", ...), or override
+per film: `/movienight play theater gits --audio jpn` (works on `load`
+too). No match falls back to the file's default track. Subtitles, by
+contrast, are per-player — each client picks its own language and toggles
+them locally.
+
+For an actual premiere, prefer `load` then `play`: `load` makes every
+decoder (server audio and each viewer's video) open the stream, seek, and
+buffer while the clock stays at 0:00 — the person who loaded gets a chat
+ping when it's buffered, and `play` then starts instantly for everyone. A
+direct `play <screen> <movie>` also works; big files just take a few seconds
+to appear while decoders warm up mid-clock.
 
 Audio is fed to Simple Voice Chat slightly *ahead* of the clock to offset
 SVC's encode/transport/buffer latency. Tune it in `config/premiere.json`:

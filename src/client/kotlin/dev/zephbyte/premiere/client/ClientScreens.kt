@@ -18,6 +18,9 @@ object ClientScreens {
 
         @Volatile
         var player: VideoPlayer? = null
+
+        @Volatile
+        var subtitleUrl: String = ""
     }
 
     private val screens = ConcurrentHashMap<String, ActiveScreen>()
@@ -35,10 +38,11 @@ object ClientScreens {
         val active = screens.computeIfAbsent(name) { ActiveScreen(payload.screen) }
         active.definition = payload.screen
         active.state = payload.state
+        active.subtitleUrl = payload.subtitleUrl
 
         when (payload.state) {
             PlayState.STOPPED -> retire(active)
-            PlayState.PLAYING, PlayState.PAUSED -> {
+            PlayState.PLAYING, PlayState.PAUSED, PlayState.LOADED -> {
                 MediaUrls.validate(payload.url)?.let { error ->
                     Premiere.LOGGER.warn("Rejecting broadcast URL for screen '{}': {}", name, error)
                     retire(active)
@@ -49,13 +53,25 @@ object ClientScreens {
                 // the same URL; rebuild instead of reusing the frozen frame.
                 if (player == null || player.url != payload.url || !player.isAlive) {
                     retire(active)
-                    player = VideoPlayer(name, payload.url)
+                    player = VideoPlayer(name, payload.url) { reportReady(name) }
                     active.player = player
                 }
                 // Every payload refreshes the sync anchor; the periodic server
                 // rebroadcast is what keeps long-running playback drift-free.
+                // LOADED behaves like paused-at-zero: decode one frame, park.
                 player.updateSync(payload.mediaPositionMs, payload.state == PlayState.PLAYING)
             }
+        }
+    }
+
+    /** First frame decoded: if the screen is in LOADED, tell the server. */
+    private fun reportReady(name: String) {
+        val active = screens[name] ?: return
+        if (active.state != PlayState.LOADED) return
+        if (net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking.canSend(dev.zephbyte.premiere.net.ScreenReadyPayload.TYPE)) {
+            net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking.send(
+                dev.zephbyte.premiere.net.ScreenReadyPayload(name)
+            )
         }
     }
 
@@ -71,6 +87,7 @@ object ClientScreens {
     fun clear() {
         screens.values.forEach { retire(it) }
         screens.clear()
+        dev.zephbyte.premiere.client.subtitles.SubtitleStore.clear()
     }
 
     private fun retire(active: ActiveScreen) {

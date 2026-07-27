@@ -131,6 +131,32 @@ object UploadServer {
                 respond(exchange, 200, "application/json", JsonObject().apply { add("movies", movies) }.toString())
             }
 
+            "/api/rename" -> {
+                val key = body["key"]?.asString
+                val rawNewName = body["newName"]?.asString
+                if (key.isNullOrBlank() || rawNewName.isNullOrBlank()) {
+                    respond(exchange, 400, "application/json", error("missing key or newName"))
+                    return
+                }
+                val extension = key.substringAfterLast('.', "mp4")
+                val newName = R2Storage.sanitizeName(rawNewName).substringBeforeLast('.')
+                val newKey = "$newName.$extension"
+                if (newKey == key) {
+                    respond(exchange, 200, "application/json", "{}")
+                    return
+                }
+                if (R2Storage.listObjects().any { it.key.equals(newKey, ignoreCase = true) }) {
+                    respond(exchange, 409, "application/json", error("A movie named '$newName' already exists"))
+                    return
+                }
+                R2Storage.copyObject(key, newKey)
+                R2Storage.deleteObject(key)
+                Premiere.LOGGER.info("Dashboard renamed '{}' to '{}'", key, newKey)
+                respond(exchange, 200, "application/json", JsonObject().apply {
+                    addProperty("name", newName)
+                }.toString())
+            }
+
             "/api/delete" -> {
                 val key = body["key"]?.asString
                 if (key.isNullOrBlank()) {
@@ -222,6 +248,7 @@ object UploadServer {
   .state.PLAYING { color: #81c995; }
   .state.PAUSED { color: #fdd663; }
   .state.STOPPED { color: #9aa0a6; }
+  .state.LOADED { color: #8ab4f8; }
   #banner { display: none; background: #3c2a2a; border: 1px solid #f28b82; border-radius: 8px;
             padding: .7rem 1rem; }
 </style>
@@ -239,16 +266,17 @@ object UploadServer {
 
   <section>
     <h2>Library <button class="ghost" id="reload" style="float:right">Refresh</button></h2>
-    <table><thead><tr><th>Name</th><th class="num">Size</th><th>Uploaded</th><th></th><th></th></tr></thead>
-    <tbody id="movies"><tr><td colspan="5" class="hint">Loading…</td></tr></tbody></table>
+    <table><thead><tr><th>Name</th><th class="num">Size</th><th>Uploaded</th><th></th><th></th><th></th></tr></thead>
+    <tbody id="movies"><tr><td colspan="6" class="hint">Loading…</td></tr></tbody></table>
   </section>
 
   <section>
     <h2>Upload</h2>
     <input id="name" type="text" placeholder="Movie name, e.g. intro_joke (what staff types in-game)">
     <div class="drop" id="drop">Drop a video here or click to choose<br>
-      <span class="hint">MP4 (H.264 + AAC) is the safe bet; MKV and MOV work too.</span></div>
-    <input id="file" type="file" accept="video/mp4,video/quicktime,video/x-matroska,.mkv,.mp4,.mov" hidden>
+      <span class="hint">MP4 (H.264 + AAC) is the safe bet; MKV and MOV work too.<br>
+      Subtitles: upload an .srt with the same name as the movie.</span></div>
+    <input id="file" type="file" accept="video/mp4,video/quicktime,video/x-matroska,.mkv,.mp4,.mov,.srt" hidden>
     <progress id="bar" max="100" value="0" hidden></progress>
     <button id="cancel" class="danger" hidden style="margin-top:.6rem">Cancel upload</button>
     <div id="out"></div>
@@ -295,15 +323,26 @@ async function refreshMovies() {
   try {
     const { movies } = await api("/api/list");
     el("movies").innerHTML = movies.length === 0
-      ? '<tr><td colspan="5" class="hint">Library is empty — upload something below.</td></tr>'
-      : movies.map(m =>
-        '<tr><td>' + esc(m.name) + '</td><td class="num">' + fmtSize(m.size) + '</td>' +
+      ? '<tr><td colspan="6" class="hint">Library is empty — upload something below.</td></tr>'
+      : movies.map(m => {
+        const isSub = m.key.toLowerCase().endsWith(".srt");
+        return '<tr><td>' + esc(m.name) + (isSub ? ' <span class="hint">(subtitles)</span>' : '') + '</td>' +
+        '<td class="num">' + fmtSize(m.size) + '</td>' +
         '<td>' + esc((m.lastModified || "").slice(0, 10)) + '</td>' +
-        '<td><button class="ghost" onclick="copyPlay(\'' + esc(m.name) + '\', this)">Copy play command</button></td>' +
-        '<td><button class="danger" onclick="del(\'' + esc(m.key) + '\')">Delete</button></td></tr>').join("");
+        '<td>' + (isSub ? '' : '<button class="ghost" onclick="copyPlay(\'' + esc(m.name) + '\', this)">Copy play command</button>') + '</td>' +
+        '<td><button class="ghost" onclick="rename(\'' + esc(m.key) + '\', \'' + esc(m.name) + '\')">Rename</button></td>' +
+        '<td><button class="danger" onclick="del(\'' + esc(m.key) + '\')">Delete</button></td></tr>';
+      }).join("");
   } catch (e) {
-    el("movies").innerHTML = '<tr><td colspan="5" class="err">' + esc(e.message) + '</td></tr>';
+    el("movies").innerHTML = '<tr><td colspan="6" class="err">' + esc(e.message) + '</td></tr>';
   }
+}
+
+async function rename(key, currentName) {
+  const newName = prompt("New name for '" + currentName + "':", currentName);
+  if (!newName || newName === currentName) return;
+  try { await api("/api/rename", { key, newName }); refreshMovies(); }
+  catch (e) { alert("Rename failed: " + e.message); }
 }
 
 function copyPlay(name, btn) {

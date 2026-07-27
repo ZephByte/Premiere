@@ -24,6 +24,7 @@ import net.minecraft.network.protocol.common.custom.CustomPacketPayload
 data class ScreenStatePayload(
     val screen: ScreenDefinition,
     val url: String,
+    val subtitleUrl: String,
     val state: PlayState,
     val mediaPositionMs: Long,
     val volume: Float,
@@ -39,6 +40,7 @@ data class ScreenStatePayload(
         buf.writeVarInt(screen.height)
         buf.writeEnum(screen.facing)
         buf.writeUtf(url)
+        buf.writeUtf(subtitleUrl)
         buf.writeEnum(state)
         buf.writeVarLong(mediaPositionMs)
         buf.writeFloat(volume)
@@ -59,6 +61,7 @@ data class ScreenStatePayload(
                         facing = buf.readEnum(Direction::class.java),
                     ),
                     url = buf.readUtf(),
+                    subtitleUrl = buf.readUtf(),
                     state = buf.readEnum(PlayState::class.java),
                     mediaPositionMs = buf.readVarLong(),
                     volume = buf.readFloat(),
@@ -84,13 +87,31 @@ class RequestScreensPayload : CustomPacketPayload {
     }
 }
 
+/** Sent by a video client when a LOADED screen has its first frame decoded. */
+data class ScreenReadyPayload(val screen: String) : CustomPacketPayload {
+    override fun type(): CustomPacketPayload.Type<ScreenReadyPayload> = TYPE
+
+    companion object {
+        val TYPE = CustomPacketPayload.Type<ScreenReadyPayload>(Premiere.id("screen_ready"))
+        val CODEC: StreamCodec<RegistryFriendlyByteBuf, ScreenReadyPayload> =
+            CustomPacketPayload.codec(
+                { payload, buf -> buf.writeUtf(payload.screen) },
+                { buf -> ScreenReadyPayload(buf.readUtf()) },
+            )
+    }
+}
+
 object PremiereNet {
     fun registerCommon() {
         PayloadTypeRegistry.clientboundPlay().register(ScreenStatePayload.TYPE, ScreenStatePayload.CODEC)
         PayloadTypeRegistry.serverboundPlay().register(RequestScreensPayload.TYPE, RequestScreensPayload.CODEC)
+        PayloadTypeRegistry.serverboundPlay().register(ScreenReadyPayload.TYPE, ScreenReadyPayload.CODEC)
 
         ServerPlayNetworking.registerGlobalReceiver(RequestScreensPayload.TYPE) { _, context ->
             dev.zephbyte.premiere.screen.ScreenManager.sendAllTo(context.player())
+        }
+        ServerPlayNetworking.registerGlobalReceiver(ScreenReadyPayload.TYPE) { payload, context ->
+            dev.zephbyte.premiere.screen.ScreenManager.clientReportedReady(payload.screen, context.player())
         }
     }
 }

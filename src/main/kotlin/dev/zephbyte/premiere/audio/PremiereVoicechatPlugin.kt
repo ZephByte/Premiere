@@ -27,6 +27,9 @@ class PremiereVoicechatPlugin : VoicechatPlugin, AudioBridge {
 
     companion object {
         private const val CATEGORY_ID = "movies"
+
+        /** Audit tolerance: SVC's own jitter is ~100-300ms; past this, rebuild. */
+        private const val DRIFT_REBUILD_MS = 750L
     }
 
     private var serverApi: VoicechatServerApi? = null
@@ -54,39 +57,108 @@ class PremiereVoicechatPlugin : VoicechatPlugin, AudioBridge {
     }
 
     override fun onPlaybackChanged(server: MinecraftServer, screen: ScreenDefinition, playback: Playback) {
-        // Sessions are rebuilt rather than seeked: pause/resume/volume land here
-        // rarely, and a fresh grabber at the master-clock position is simpler
-        // and more robust than nudging a live decoder.
-        stopSession(screen.name)
+        val existing = sessions[screen.name]
+        val resumable = existing != null && existing.generation == playback.generation &&
+            existing.url == playback.url && !existing.streamer.finished
+
+        when (playback.state) {
+            PlayState.LOADED -> {
+                sessions.remove(screen.name)?.close()
+                // Prime: the streamer opens the URL, seeks, and fills its
+                // buffer now, so audio starts the instant staff hits play.
+                val streamer = newStreamer(playback)
+                sessions[screen.name] = Session(streamer, playback.url, playback.generation)
+            }
+
+            PlayState.PLAYING -> {
+                if (resumable) {
+                    // Same film, same run: attach a player to the parked
+                    // streamer (primed load, or a pause whose decoder and
+                    // buffered queue we deliberately kept). Instant and
+                    // position-exact — the queue holds the frames from the
+                    // exact point consumption stopped.
+                    if (existing!!.player?.isPlaying != true) {
+                        attachPlayer(server, screen, existing)
+                    }
+                    // else: e.g. a volume push mid-play; gain is live, nothing to do
+                } else {
+                    sessions.remove(screen.name)?.close()
+                    startCold(server, screen, playback)
+                }
+            }
+
+            PlayState.PAUSED -> {
+                if (resumable) {
+                    existing!!.detachPlayer() // keep decoder + buffer parked
+                } else {
+                    sessions.remove(screen.name)?.close()
+                }
+            }
+
+            PlayState.STOPPED -> sessions.remove(screen.name)?.close()
+        }
+    }
+
+    override fun onSyncCheck(server: MinecraftServer, screen: ScreenDefinition, playback: Playback) {
         if (playback.state != PlayState.PLAYING) return
+        val session = sessions[screen.name] ?: return
+        if (session.streamer.finished) return // film's audio ended; nothing to correct
+        val estimated = session.streamer.estimatedPositionMs() ?: return // still opening
+        val target = playback.currentPositionMs() + dev.zephbyte.premiere.PremiereConfig.audioLeadMs
+        val drift = estimated - target
+        if (Math.abs(drift) > DRIFT_REBUILD_MS) {
+            Premiere.LOGGER.info("Audio on '{}' drifted {}ms; rebuilding session", screen.name, drift)
+            sessions.remove(screen.name)?.close()
+            startCold(server, screen, playback)
+        }
+    }
+
+    private fun newStreamer(playback: Playback): AudioStreamer = AudioStreamer(
+        playback.url,
+        { playback.currentPositionMs() },
+        { playback.volume },
+        playback.audioLanguage.ifBlank { dev.zephbyte.premiere.PremiereConfig.audioLanguage },
+    )
+
+    private fun startCold(server: MinecraftServer, screen: ScreenDefinition, playback: Playback) {
+        val streamer = newStreamer(playback)
+        val session = Session(streamer, playback.url, playback.generation)
+        sessions[screen.name] = session
+        if (!attachPlayer(server, screen, session)) {
+            sessions.remove(screen.name)?.close()
+        }
+    }
+
+    private fun attachPlayer(server: MinecraftServer, screen: ScreenDefinition, session: Session): Boolean {
         val api = serverApi ?: run {
             Premiere.LOGGER.warn("Voice chat server not started yet; no audio for '{}'", screen.name)
-            return
+            return false
         }
-
-        val levelKey = ResourceKey.create(net.minecraft.core.registries.Registries.DIMENSION, Identifier.parse(screen.dimension))
-        val level = server.getLevel(levelKey) ?: run {
-            Premiere.LOGGER.warn("Dimension {} not found for screen '{}'", screen.dimension, screen.name)
-            return
+        var channel = session.channel
+        if (channel == null) {
+            val levelKey = ResourceKey.create(net.minecraft.core.registries.Registries.DIMENSION, Identifier.parse(screen.dimension))
+            val level = server.getLevel(levelKey) ?: run {
+                Premiere.LOGGER.warn("Dimension {} not found for screen '{}'", screen.dimension, screen.name)
+                return false
+            }
+            val center = screen.faceCenter()
+            channel = api.createLocationalAudioChannel(
+                UUID.randomUUID(),
+                api.fromServerLevel(level),
+                api.createPosition(center.x, center.y, center.z),
+            ) ?: run {
+                Premiere.LOGGER.warn("Could not create audio channel for '{}'", screen.name)
+                return false
+            }
+            channel.setCategory(CATEGORY_ID)
+            // Audible across a large theater room; SVC applies distance falloff.
+            channel.setDistance(dev.zephbyte.premiere.PremiereConfig.audioDistance)
+            session.channel = channel
         }
-
-        val center = screen.faceCenter()
-        val channel = api.createLocationalAudioChannel(
-            UUID.randomUUID(),
-            api.fromServerLevel(level),
-            api.createPosition(center.x, center.y, center.z),
-        ) ?: run {
-            Premiere.LOGGER.warn("Could not create audio channel for '{}'", screen.name)
-            return
-        }
-        channel.setCategory(CATEGORY_ID)
-        // Audible across a large theater room; SVC applies distance falloff.
-        channel.setDistance(dev.zephbyte.premiere.PremiereConfig.audioDistance)
-
-        val streamer = AudioStreamer(playback.url, { playback.currentPositionMs() }) { playback.volume }
-        val player = api.createAudioPlayer(channel, api.createEncoder(), streamer::nextFrame)
-        sessions[screen.name] = Session(player, streamer)
+        val player = api.createAudioPlayer(channel, api.createEncoder(), session.streamer::nextFrame)
+        session.player = player
         player.startPlaying()
+        return true
     }
 
     override fun onScreenRemoved(screenName: String) {
@@ -98,11 +170,26 @@ class PremiereVoicechatPlugin : VoicechatPlugin, AudioBridge {
     }
 
     private fun stopSession(screenName: String) {
-        sessions.remove(screenName)?.let {
-            runCatching { it.player.stopPlaying() }
-            it.streamer.close()
-        }
+        sessions.remove(screenName)?.close()
     }
 
-    private class Session(val player: AudioPlayer, val streamer: AudioStreamer)
+    /**
+     * One screen's audio: decoder + (once audible) SVC channel and player.
+     * [player] is null while primed or paused; the decoder and its buffered
+     * queue survive both so starting is instant and position-exact.
+     */
+    private class Session(val streamer: AudioStreamer, val url: String, val generation: Int) {
+        var channel: de.maxhenkel.voicechat.api.audiochannel.LocationalAudioChannel? = null
+        var player: AudioPlayer? = null
+
+        fun detachPlayer() {
+            runCatching { player?.stopPlaying() }
+            player = null
+        }
+
+        fun close() {
+            detachPlayer()
+            streamer.close()
+        }
+    }
 }

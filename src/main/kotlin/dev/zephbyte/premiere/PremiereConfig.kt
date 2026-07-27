@@ -24,6 +24,14 @@ object PremiereConfig {
     var audioDistance: Float = 48f
         private set
 
+    /**
+     * Preferred audio track language for multi-audio films (ISO 639 as
+     * releases tag it: "eng", "jpn", ...). Blank keeps the file's default
+     * track. Overridable per film: /movienight play <screen> <movie> --audio jpn
+     */
+    var audioLanguage: String = ""
+        private set
+
     // --- /movienight upload: in-game link to a drag-and-drop page served by
     // this server that uploads straight to the operator's R2 bucket. The
     // credential below is deliberately the only place it lives; scope the API
@@ -59,6 +67,7 @@ object PremiereConfig {
                 val o = JsonParser.parseString(Files.readString(path)).asJsonObject
                 o["audio_lead_ms"]?.let { audioLeadMs = it.asLong }
                 o["audio_distance"]?.let { audioDistance = it.asFloat }
+                o["audio_language"]?.let { audioLanguage = it.asString.lowercase().trim() }
                 o["upload_http_port"]?.let { uploadHttpPort = it.asInt }
                 o["upload_public_address"]?.let { uploadPublicAddress = it.asString.trimEnd('/') }
                 o["r2_account_id"]?.let { r2AccountId = it.asString }
@@ -80,6 +89,7 @@ object PremiereConfig {
         val o = JsonObject().apply {
             addProperty("audio_lead_ms", audioLeadMs)
             addProperty("audio_distance", audioDistance)
+            addProperty("audio_language", audioLanguage)
             addProperty("upload_http_port", uploadHttpPort)
             addProperty("upload_public_address", uploadPublicAddress)
             addProperty("r2_account_id", r2AccountId)

@@ -14,6 +14,7 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking
 class PremiereClient : ClientModInitializer {
 
     override fun onInitializeClient() {
+        PremiereClientConfig.load()
         ClientPlayNetworking.registerGlobalReceiver(ScreenStatePayload.TYPE) { payload, _ ->
             ClientScreens.handle(payload)
         }
@@ -29,5 +30,27 @@ class PremiereClient : ClientModInitializer {
             ClientScreens.clear()
         }
         ScreenRenderer.register()
+        dev.zephbyte.premiere.client.subtitles.SubtitleHud.register()
+        registerSubtitleKeybind()
+    }
+
+    private fun registerSubtitleKeybind() {
+        val key = net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper.registerKeyMapping(
+            net.minecraft.client.KeyMapping(
+                "key.premiere.subtitles",
+                org.lwjgl.glfw.GLFW.GLFW_KEY_K,
+                net.minecraft.client.KeyMapping.Category.MISC,
+            )
+        )
+        net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register { client ->
+            while (key.consumeClick()) {
+                val enabled = PremiereClientConfig.toggleSubtitles()
+                client.player?.sendOverlayMessage(
+                    net.minecraft.network.chat.Component.literal(
+                        if (enabled) "Movie subtitles on" else "Movie subtitles off"
+                    )
+                )
+            }
+        }
     }
 }

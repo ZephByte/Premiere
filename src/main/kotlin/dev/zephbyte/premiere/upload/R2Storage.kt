@@ -75,16 +75,37 @@ object R2Storage {
         }
     }
 
+    /** S3 has no rename; this is the copy half (server-side, no data transfer). */
+    fun copyObject(sourceKey: String, destinationKey: String) {
+        val copySource = "/${PremiereConfig.r2Bucket}/${encodeKey(sourceKey)}"
+        val response = sendSigned("PUT", destinationKey, "", mapOf("x-amz-copy-source" to copySource))
+        if (response.statusCode() !in 200..299 || response.body().contains("<Error>")) {
+            throw IllegalStateException("R2 copy failed: HTTP ${response.statusCode()}: ${response.body().take(200)}")
+        }
+    }
+
     /** Header-signed (SigV4) request to the bucket or an object in it. */
-    private fun sendSigned(method: String, key: String?, query: String): HttpResponse<String> {
+    private fun sendSigned(
+        method: String,
+        key: String?,
+        query: String,
+        extraHeaders: Map<String, String> = emptyMap(),
+    ): HttpResponse<String> {
         val host = host()
         val amzDate = AMZ_DATE.format(Instant.now())
         val dateStamp = amzDate.substring(0, 8)
         val scope = "$dateStamp/auto/s3/aws4_request"
         val path = "/${PremiereConfig.r2Bucket}" + if (key != null) "/${encodeKey(key)}" else ""
 
-        val canonicalHeaders = "host:$host\nx-amz-content-sha256:$EMPTY_SHA256\nx-amz-date:$amzDate\n"
-        val signedHeaders = "host;x-amz-content-sha256;x-amz-date"
+        // Canonical headers must be sorted by (lowercase) name.
+        val headers = sortedMapOf(
+            "host" to host,
+            "x-amz-content-sha256" to EMPTY_SHA256,
+            "x-amz-date" to amzDate,
+        )
+        extraHeaders.forEach { (k, v) -> headers[k.lowercase()] = v }
+        val canonicalHeaders = headers.entries.joinToString("") { (k, v) -> "$k:$v\n" }
+        val signedHeaders = headers.keys.joinToString(";")
         val canonicalRequest = listOf(
             method, path, query, canonicalHeaders, signedHeaders, EMPTY_SHA256,
         ).joinToString("\n")
@@ -94,9 +115,9 @@ object R2Storage {
         val signature = hex(hmac(signingKey(dateStamp), stringToSign))
 
         val uri = URI("https://$host$path" + if (query.isNotEmpty()) "?$query" else "")
-        val request = HttpRequest.newBuilder(uri)
-            .header("x-amz-date", amzDate)
-            .header("x-amz-content-sha256", EMPTY_SHA256)
+        val builder = HttpRequest.newBuilder(uri)
+        headers.forEach { (k, v) -> if (k != "host") builder.header(k, v) }
+        val request = builder
             .header(
                 "Authorization",
                 "AWS4-HMAC-SHA256 Credential=${PremiereConfig.r2AccessKeyId}/$scope, " +

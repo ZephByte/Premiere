@@ -23,6 +23,7 @@ class Premiere : ModInitializer {
         PremiereNet.registerCommon()
         MovieNightCommand.register()
         ScreenManager.init()
+        dev.zephbyte.premiere.screen.SelectionTool.register()
         LOGGER.info("Premiere initialized (no registry entries, vanilla clients unaffected)")
     }
 

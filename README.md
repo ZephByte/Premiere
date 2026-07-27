@@ -1,11 +1,16 @@
 # Premiere
 
-An in-world movie theater for Fabric servers. Staff upload a movie through a
-drag-and-drop page and play it by name (`/pm play theater big_buck_bunny`);
-players who installed the client mod see the film on an ordinary block wall
-and hear the soundtrack positionally through the mod's own audio engine —
-decoded on their machine from the same stream as the picture, so lips and
-voices cannot drift apart.
+An in-world movie theater for **Fabric and Paper servers**. Staff upload a
+movie through a drag-and-drop page and play it by name
+(`/pm play theater big_buck_bunny`); players who installed the client mod see
+the film on an ordinary block wall and hear the soundtrack positionally
+through the mod's own audio engine — decoded on their machine from the same
+stream as the picture, so lips and voices cannot drift apart.
+
+The server side ships as two interchangeable artifacts speaking the identical
+wire protocol: a Fabric mod (which also contains the client half) and a Paper
+plugin. Players always use the Fabric client mod regardless of which one the
+server runs — a client cannot tell a Paper server from a Fabric one.
 
 **A fully vanilla client connects and plays normally, always.** Premiere
 registers no blocks, items, fluids, or block entities, so Fabric's registry
@@ -29,12 +34,16 @@ only mandatory piece, and only on the server.
 The full checklist, in order. Steps 1–2 get you a working theater; steps
 3–4 add the movie library (uploads + play-by-name).
 
-1. Drop the Premiere jar in the server's `mods` folder (requires Fabric API
-   and Fabric Language Kotlin, like the client). First boot writes
+1. **Fabric:** drop the Premiere jar in the server's `mods` folder (requires
+   Fabric API and Fabric Language Kotlin, like the client). First boot writes
    `config/premiere.json` with every setting blank or defaulted.
-2. Optional: install LuckPerms and grant `movienight.control` to staff.
-   Without LuckPerms, the commands fall back to requiring op level 2.
-   `/pm list` is open to everyone.
+   **Paper:** drop `Premiere-Paper` in `plugins`; the config is written to
+   `plugins/Premiere/premiere.json` instead (same keys everywhere this README
+   says `config/premiere.json`).
+2. Optional: grant `movienight.control` to staff. On Fabric, install
+   LuckPerms; without it the commands fall back to requiring op level 2. On
+   Paper it's a normal Bukkit permission (defaults to op), so any permissions
+   plugin works out of the box. `/pm list` is open to everyone.
 3. Set up the movie library: a one-time ~15-minute Cloudflare R2 setup, then
    fill in the `r2_*` and `upload_*` fields of `config/premiere.json`.
    Full walkthrough in [Hosting the movie file](#hosting-the-movie-file).
@@ -251,9 +260,63 @@ until `stop` clears it.
 
 ## Development
 
-- `./gradlew build` produces the jar in `build/libs`.
-- `./gradlew runServer` starts a dev server; `./gradlew runClient` starts a
-  dev client that auto-joins `127.0.0.1:25565`.
+Three Gradle modules:
+
+- `common/` — pure-JVM shared core: screen registry, playback clock, wire
+  codecs (raw netty), upload/dashboard, R2. Zero `net.minecraft`/loader
+  imports (Fabric remaps to intermediary at runtime, Paper runs mojmap — MC
+  references here would break one side or the other).
+- `fabric/` — the mod: client (video/audio/subtitles) + a thin server
+  adapter over the common core. This is the only MC-version-sensitive module.
+- `paper/` — the plugin: Bukkit-API-only adapter over the same core, shadow-
+  jarred with kotlin-stdlib.
+
+The `fabric` module is versioned by [Stonecutter](https://stonecutter.kikugie.dev/):
+one subproject per MC version (`fabric/versions/<v>/`), sources shared with
+version-gated comments. Adding an MC version later: append it to `versions()`
+in `settings.gradle.kts`, create `fabric/versions/<v>/gradle.properties`
+(minecraft_version + fabric_version), append to `modrinth_versions` in
+`gradle.properties`, and gate divergent code with stonecutter comments.
+`common` and `paper` are deliberately version-free.
+
+Commands:
+
+- `./gradlew assembleAll` builds every Fabric version jar plus the Paper
+  plugin jar in lockstep (`fabric/versions/<v>/build/libs`,
+  `paper/build/libs`). Ship artifacts from the same release: the wire format
+  carries a version byte and mismatches fail loud.
+- `./gradlew :fabric:26.2:runServer` starts a Fabric dev server;
+  `./gradlew :fabric:26.2:runClient` starts a dev client that auto-joins
+  `127.0.0.1:25565`. All versions share the `fabric/run` harness.
+- `./gradlew :paper:runPaper` rebuilds the plugin and starts the Paper dev
+  server (one-time: put a Paper jar at `paper/run/paper.jar` from the PaperMC
+  downloads API and set `eula=true`). The same dev client connects to it —
+  which is exactly the wire-compatibility test.
+
+## Releasing
+
+One-time setup:
+
+1. Create the Modrinth project (in its settings mark **both client and server
+   supported** — the Fabric jar carries both halves) and put its project ID in
+   `modrinth_id` in `gradle.properties`. Create the CurseForge project and put
+   the numeric ID in `curseforge_id`. Until the IDs are set, the publish step
+   dry-runs harmlessly.
+2. Add `MODRINTH_TOKEN` and `CURSEFORGE_TOKEN` secrets to the GitHub repo.
+
+Per release:
+
+1. Add a `## Premiere - vX.Y.Z` section at the top of `CHANGELOG.md`.
+2. Set `mod_version=vX.Y.Z` in `gradle.properties` (use `-beta.N`/`-alpha.N`
+   suffixes for prereleases — they publish as such everywhere).
+3. Commit, then `git tag vX.Y.Z && git push --tags`.
+
+The release workflow verifies the tag matches `mod_version`, builds all
+artifacts, creates a GitHub Release with every jar and the changelog section,
+and publishes: each Fabric version jar (`vX.Y.Z+<mc>`) to Modrinth and
+CurseForge, and the Paper jar (`vX.Y.Z+paper`) to the same Modrinth project.
+Local publish check: `./gradlew :fabric:chiseledPublishMods :paper:publishMods`
+(dry-runs without tokens; always use this pair, never bare `publishMods`).
 
 ## License
 

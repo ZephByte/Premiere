@@ -1,0 +1,10 @@
+name: Premiere
+version: '${version}'
+main: dev.zephbyte.premiere.paper.PremierePaperPlugin
+api-version: '1.21'
+description: In-world movie theater; players with the Premiere client mod see films on vanilla block walls.
+author: ZephByte
+permissions:
+  movienight.control:
+    description: Operate Premiere screens and playback
+    default: op

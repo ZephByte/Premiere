@@ -16,7 +16,13 @@ import java.nio.charset.StandardCharsets
  */
 object EmbeddedSubtitles {
 
-    class Track(val streamIndex: Int, val codecId: Int, val millisPerPts: Double)
+    class Track(
+        val streamIndex: Int,
+        val codecId: Int,
+        val millisPerPts: Double,
+        val language: String,
+        val disposition: Int,
+    )
 
     private val TAGS = Regex("<[^>]*>|\\{[^}]*\\}")
 
@@ -29,39 +35,49 @@ object EmbeddedSubtitles {
         avcodec.AV_CODEC_ID_MOV_TEXT,
     )
 
-    /**
-     * Best text-subtitle stream in the file, or null if there is none.
-     * Real releases carry many: a "forced" track (foreign-language moments
-     * only — picking that looks like "subtitles don't work"), SDH variants,
-     * and a dozen languages. Score rather than take the first: prefer the
-     * configured language, shun forced, mildly shun SDH.
-     */
-    fun pickTrack(grabber: FFmpegFrameGrabber): Track? {
-        val context = grabber.formatContext ?: return null
-        val preferred = dev.zephbyte.premiere.client.PremiereClientConfig.subtitleLanguage.lowercase()
-        var best: Track? = null
-        var bestScore = Int.MIN_VALUE
+    /** Every text-subtitle stream in the file (bitmap tracks are skipped). */
+    fun tracks(grabber: FFmpegFrameGrabber): List<Track> {
+        val context = grabber.formatContext ?: return emptyList()
+        val found = ArrayList<Track>()
         for (i in 0 until context.nb_streams()) {
             val stream = context.streams(i) ?: continue
             val par = stream.codecpar() ?: continue
             if (par.codec_type() != avutil.AVMEDIA_TYPE_SUBTITLE) continue
-            if (par.codec_id() !in TEXT_CODECS) continue // bitmap subtitle codecs: skip
-
-            val disposition = stream.disposition()
+            if (par.codec_id() !in TEXT_CODECS) continue
+            val timeBase = stream.time_base()
             val language = org.bytedeco.ffmpeg.global.avutil
                 .av_dict_get(stream.metadata(), "language", null, 0)
                 ?.value()?.string?.lowercase() ?: ""
+            found.add(
+                Track(i, par.codec_id(), 1000.0 * timeBase.num() / timeBase.den(), language, stream.disposition())
+            )
+        }
+        return found
+    }
 
+    /**
+     * Best track for a language. Real releases carry many: a "forced" track
+     * (foreign-language moments only — picking that looks like "subtitles
+     * don't work"), SDH variants, and a dozen languages. Score rather than
+     * take the first: prefer the requested language, shun forced, mildly
+     * shun SDH. Re-run whenever the player changes language — cues for every
+     * track are collected regardless, so switching is instant.
+     */
+    fun bestTrack(tracks: List<Track>, language: String): Track? {
+        val preferred = language.lowercase()
+        var best: Track? = null
+        var bestScore = Int.MIN_VALUE
+        for (track in tracks) {
             var score = 0
-            if (language.startsWith(preferred) || preferred.startsWith(language) && language.isNotEmpty()) score += 100
-            if (disposition and org.bytedeco.ffmpeg.global.avformat.AV_DISPOSITION_FORCED != 0) score -= 1000
-            if (disposition and org.bytedeco.ffmpeg.global.avformat.AV_DISPOSITION_HEARING_IMPAIRED != 0) score -= 10
-            if (disposition and org.bytedeco.ffmpeg.global.avformat.AV_DISPOSITION_DEFAULT != 0) score += 5
-
+            if (track.language.isNotEmpty() &&
+                (track.language.startsWith(preferred) || preferred.startsWith(track.language))
+            ) score += 100
+            if (track.disposition and org.bytedeco.ffmpeg.global.avformat.AV_DISPOSITION_FORCED != 0) score -= 1000
+            if (track.disposition and org.bytedeco.ffmpeg.global.avformat.AV_DISPOSITION_HEARING_IMPAIRED != 0) score -= 10
+            if (track.disposition and org.bytedeco.ffmpeg.global.avformat.AV_DISPOSITION_DEFAULT != 0) score += 5
             if (score > bestScore) {
                 bestScore = score
-                val timeBase = stream.time_base()
-                best = Track(i, par.codec_id(), 1000.0 * timeBase.num() / timeBase.den())
+                best = track
             }
         }
         return best

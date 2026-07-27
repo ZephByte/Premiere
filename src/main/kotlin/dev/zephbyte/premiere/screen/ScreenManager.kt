@@ -5,7 +5,6 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import dev.zephbyte.premiere.Premiere
-import dev.zephbyte.premiere.audio.AudioBridge
 import dev.zephbyte.premiere.net.ScreenStatePayload
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents
@@ -15,15 +14,19 @@ import net.minecraft.core.BlockPos
 import net.minecraft.core.Direction
 import net.minecraft.server.MinecraftServer
 import net.minecraft.server.level.ServerPlayer
+import dev.zephbyte.premiere.upload.UploadServer
 import net.minecraft.world.level.storage.LevelResource
+import net.minecraft.world.phys.Vec3
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.UUID
+import java.util.concurrent.CompletableFuture
 
 class ManagedScreen(val definition: ScreenDefinition) {
     val playback = Playback()
 
-    /** Who ran /movienight load, for the "it's buffered" ping. */
-    var loaderUuid: java.util.UUID? = null
+    /** Who ran /pm load, for the "it's buffered" ping. */
+    var loaderUuid: UUID? = null
     var readyNotified = false
 }
 
@@ -34,7 +37,9 @@ class ManagedScreen(val definition: ScreenDefinition) {
  * is not persisted; a restart mid-film means staff replays.
  */
 object ScreenManager {
-    private val screens = LinkedHashMap<String, ManagedScreen>()
+    // Mutated on the server thread only, but read from command-suggestion and
+    // dashboard threads — hence concurrent. Views are name-sorted for output.
+    private val screens = java.util.concurrent.ConcurrentHashMap<String, ManagedScreen>()
     private var server: MinecraftServer? = null
 
     /** Rebroadcast cadence for playing screens; doubles as drift correction. */
@@ -47,25 +52,49 @@ object ScreenManager {
             load(server)
         }
         ServerLifecycleEvents.SERVER_STOPPING.register { _ ->
-            AudioBridge.instance?.shutdownAll()
-            dev.zephbyte.premiere.upload.UploadServer.stop()
+            UploadServer.stop()
             server = null
         }
         ServerTickEvents.END_SERVER_TICK.register { server ->
             if (++tickCounter >= REBROADCAST_TICKS) {
                 tickCounter = 0
                 screens.values.filter { it.playback.state == PlayState.PLAYING }
-                    .forEach { screen ->
-                        broadcast(server, screen)
-                        AudioBridge.instance?.onSyncCheck(server, screen.definition, screen.playback)
-                    }
+                    .forEach { broadcast(server, it) }
             }
         }
     }
 
-    fun all(): Collection<ManagedScreen> = screens.values
+    fun all(): List<ManagedScreen> = screens.values.sortedBy { it.definition.name }
 
     fun get(name: String): ManagedScreen? = screens[name]
+
+    fun nearestTo(dimension: String, position: Vec3): ManagedScreen? =
+        screens.values.filter { it.definition.dimension == dimension }
+            .minByOrNull { it.definition.faceCenter().distanceToSqr(position) }
+
+    fun single(): ManagedScreen? = screens.values.singleOrNull()
+
+    /**
+     * Dashboard bridge: runs [action] on the server thread against a named
+     * screen and hands back a user-readable error, or null on success.
+     */
+    fun dashboardAction(
+        name: String,
+        action: (MinecraftServer, ManagedScreen) -> String?,
+    ): CompletableFuture<String?> {
+        val server = this.server
+            ?: return CompletableFuture.completedFuture("Server not ready")
+        val future = CompletableFuture<String?>()
+        server.execute {
+            val screen = screens[name]
+            if (screen == null) {
+                future.complete("No screen named '$name'")
+            } else {
+                future.complete(runCatching { action(server, screen) }.getOrElse { it.message ?: "error" })
+            }
+        }
+        return future
+    }
 
     fun define(server: MinecraftServer, definition: ScreenDefinition): Boolean {
         if (screens.containsKey(definition.name)) return false
@@ -79,7 +108,6 @@ object ScreenManager {
     fun undefine(server: MinecraftServer, name: String): Boolean {
         val screen = screens.remove(name) ?: return false
         screen.playback.stop()
-        AudioBridge.instance?.onScreenRemoved(name)
         save(server)
         sendToAll(server, payloadFor(screen, removed = true))
         return true
@@ -118,6 +146,11 @@ object ScreenManager {
         pushPlayback(server, screen)
     }
 
+    fun seek(server: MinecraftServer, screen: ManagedScreen, toMs: Long) {
+        screen.playback.seek(toMs)
+        pushPlayback(server, screen)
+    }
+
     /** A video client decoded its first frame of a LOADED screen. */
     fun clientReportedReady(screenName: String, reporter: ServerPlayer) {
         val screen = screens[screenName] ?: return
@@ -125,7 +158,7 @@ object ScreenManager {
         screen.readyNotified = true
         val loader = screen.loaderUuid?.let { uuid -> server?.playerList?.getPlayer(uuid) }
         val message = net.minecraft.network.chat.Component.literal(
-            "'${screen.playback.label}' is buffered on ${reporter.gameProfile.name}'s client — /movienight play $screenName to roll."
+            "'${screen.playback.label}' is buffered on ${reporter.gameProfile.name}'s client — /pm play $screenName to roll."
         )
         if (loader != null) {
             loader.sendSystemMessage(message)
@@ -154,7 +187,6 @@ object ScreenManager {
 
     private fun pushPlayback(server: MinecraftServer, screen: ManagedScreen) {
         broadcast(server, screen)
-        AudioBridge.instance?.onPlaybackChanged(server, screen.definition, screen.playback)
     }
 
     /** Plain-types snapshot of one screen for the staff dashboard. */
@@ -172,10 +204,10 @@ object ScreenManager {
      * Dashboard snapshot, completed on the server thread so HTTP threads never
      * touch live game state directly.
      */
-    fun statusSnapshot(): java.util.concurrent.CompletableFuture<List<ScreenStatus>> {
+    fun statusSnapshot(): CompletableFuture<List<ScreenStatus>> {
         val server = this.server
-            ?: return java.util.concurrent.CompletableFuture.completedFuture(emptyList())
-        val future = java.util.concurrent.CompletableFuture<List<ScreenStatus>>()
+            ?: return CompletableFuture.completedFuture(emptyList())
+        val future = CompletableFuture<List<ScreenStatus>>()
         server.execute {
             future.complete(screens.values.map { screen ->
                 val d = screen.definition
@@ -219,6 +251,8 @@ object ScreenManager {
             screen = screen.definition,
             url = playback.url,
             subtitleUrl = playback.subtitleUrl,
+            audioLanguage = playback.audioLanguage.ifBlank { dev.zephbyte.premiere.PremiereConfig.audioLanguage },
+            audioDistance = dev.zephbyte.premiere.PremiereConfig.audioDistance,
             state = playback.state,
             mediaPositionMs = playback.currentPositionMs(),
             volume = playback.volume,

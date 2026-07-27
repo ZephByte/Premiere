@@ -39,9 +39,6 @@ loom {
 
 repositories {
     mavenCentral()
-    maven("https://maven.maxhenkel.de/repository/public") {
-        name = "henkelmax"
-    }
 }
 
 // ffmpeg (via JavaCPP) is bundled so neither the rented server host nor players
@@ -72,9 +69,6 @@ dependencies {
     implementation("net.fabricmc:fabric-language-kotlin:${project.property("kotlin_loader_version")}")
     implementation("net.fabricmc.fabric-api:fabric-api:${project.property("fabric_version")}")
 
-    // Provided by the Simple Voice Chat mod at runtime; only the "voicechat"
-    // entrypoint ever touches these classes, so SVC stays optional.
-    compileOnly("de.maxhenkel.voicechat:voicechat-api:2.6.20")
     // Provided by LuckPerms at runtime; guarded behind isModLoaded("luckperms").
     compileOnly("net.luckperms:api:5.5")
 

@@ -80,6 +80,17 @@ class Playback {
         state = PlayState.PLAYING
     }
 
+    /**
+     * Jump the master clock. Bumps the generation so the audio session is
+     * rebuilt at the new position; video clients hard-seek on the next
+     * broadcast because the drift exceeds their threshold.
+     */
+    fun seek(toMs: Long, now: Long = System.currentTimeMillis()) {
+        positionMs = toMs.coerceAtLeast(0)
+        anchorMs = now
+        generation++
+    }
+
     fun stop() {
         state = PlayState.STOPPED
         positionMs = 0

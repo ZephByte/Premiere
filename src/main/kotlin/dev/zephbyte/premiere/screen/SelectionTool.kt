@@ -13,7 +13,7 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * WorldEdit-style corner selection without a wand *item* — registering an
  * item is the one thing this mod must never do (it would trip the registry
- * sync and kick vanilla clients). Instead, /movienight wand toggles a
+ * sync and kick vanilla clients). Instead, /pm wand toggles a
  * per-player mode in which left-click marks corner 1 and right-click corner
  * 2; the clicks are swallowed so nothing breaks or places. /movienight
  * define <name> then reads the selection.
@@ -86,7 +86,7 @@ object SelectionTool {
 
     private fun readiness(selection: Selection): String =
         if (selection.corner1 != null && selection.corner2 != null) {
-            " — run /movienight define <name>"
+            " — run /pm define <name>"
         } else {
             ""
         }

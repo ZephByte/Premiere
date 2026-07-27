@@ -8,6 +8,9 @@ import dev.zephbyte.premiere.screen.ScreenDefinition
 import dev.zephbyte.premiere.util.MediaUrls
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import dev.zephbyte.premiere.client.subtitles.SubtitleStore
+import dev.zephbyte.premiere.net.ScreenReadyPayload
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking
 
 /** Client-side mirror of the server's screens, driven entirely by payloads. */
 object ClientScreens {
@@ -53,13 +56,20 @@ object ClientScreens {
                 // the same URL; rebuild instead of reusing the frozen frame.
                 if (player == null || player.url != payload.url || !player.isAlive) {
                     retire(active)
-                    player = VideoPlayer(name, payload.url) { reportReady(name) }
+                    player = VideoPlayer(
+                        name,
+                        payload.url,
+                        payload.screen.faceCenter(),
+                        payload.audioDistance,
+                        payload.audioLanguage,
+                    ) { reportReady(name) }
                     active.player = player
                 }
                 // Every payload refreshes the sync anchor; the periodic server
                 // rebroadcast is what keeps long-running playback drift-free.
                 // LOADED behaves like paused-at-zero: decode one frame, park.
                 player.updateSync(payload.mediaPositionMs, payload.state == PlayState.PLAYING)
+                player.setVolume(payload.volume)
             }
         }
     }
@@ -68,10 +78,8 @@ object ClientScreens {
     private fun reportReady(name: String) {
         val active = screens[name] ?: return
         if (active.state != PlayState.LOADED) return
-        if (net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking.canSend(dev.zephbyte.premiere.net.ScreenReadyPayload.TYPE)) {
-            net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking.send(
-                dev.zephbyte.premiere.net.ScreenReadyPayload(name)
-            )
+        if (ClientPlayNetworking.canSend(ScreenReadyPayload.TYPE)) {
+            ClientPlayNetworking.send(ScreenReadyPayload(name))
         }
     }
 
@@ -87,7 +95,7 @@ object ClientScreens {
     fun clear() {
         screens.values.forEach { retire(it) }
         screens.clear()
-        dev.zephbyte.premiere.client.subtitles.SubtitleStore.clear()
+        SubtitleStore.clear()
     }
 
     private fun retire(active: ActiveScreen) {

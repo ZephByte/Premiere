@@ -1,6 +1,8 @@
 package dev.zephbyte.premiere.client.video
 
 import dev.zephbyte.premiere.Premiere
+import dev.zephbyte.premiere.client.subtitles.EmbeddedSubtitleTracks
+import dev.zephbyte.premiere.client.subtitles.SubtitleCue
 import dev.zephbyte.premiere.util.MediaUrls
 import net.minecraft.client.Minecraft
 import net.minecraft.client.renderer.texture.DynamicTexture
@@ -25,6 +27,9 @@ import kotlin.math.min
 class VideoPlayer(
     screenName: String,
     val url: String,
+    audioPosition: net.minecraft.world.phys.Vec3,
+    audioDistance: Float,
+    private val audioLanguage: String,
     private val onFirstFrame: (() -> Unit)? = null,
 ) : AutoCloseable {
 
@@ -82,6 +87,7 @@ class VideoPlayer(
         anchorMediaMs = mediaPositionMs
         anchorLocalMs = System.currentTimeMillis()
         this.playing = playing
+        audio.setPaused(!playing)
     }
 
     private fun targetMediaMs(): Long =
@@ -90,21 +96,21 @@ class VideoPlayer(
     /** Master-clock media position; also drives the subtitle overlay. */
     fun currentMediaMs(): Long = targetMediaMs().coerceAtLeast(0)
 
-    // Embedded text subtitles, collected as their packets stream in alongside
-    // the video. Keyed by start time: naturally sorted, and re-decoded packets
-    // after a hard seek simply overwrite themselves.
-    private val embeddedCues =
-        java.util.concurrent.ConcurrentSkipListMap<Long, dev.zephbyte.premiere.client.subtitles.SubtitleCue>()
+    private val subtitles = EmbeddedSubtitleTracks()
 
-    @Volatile
-    private var hasSubtitleTrack = false
+    // The soundtrack: our own OpenAL positional source, clock-locked here.
+    private val audio = dev.zephbyte.premiere.client.audio.MovieAudio(
+        audioPosition.x.toFloat(), audioPosition.y.toFloat(), audioPosition.z.toFloat(),
+        audioDistance,
+        clock = { targetMediaMs() },
+        trimMs = { dev.zephbyte.premiere.client.PremiereClientConfig.avSyncMs },
+    )
 
-    fun hasEmbeddedSubtitles(): Boolean = hasSubtitleTrack
+    fun setVolume(value: Float) = audio.setVolume(value)
 
-    fun activeEmbeddedCue(positionMs: Long): dev.zephbyte.premiere.client.subtitles.SubtitleCue? {
-        val entry = embeddedCues.floorEntry(positionMs) ?: return null
-        return if (positionMs < entry.value.endMs) entry.value else null
-    }
+    fun hasEmbeddedSubtitles(): Boolean = subtitles.any()
+
+    fun activeEmbeddedCue(positionMs: Long): SubtitleCue? = subtitles.activeCue(positionMs)
 
     private fun decodeLoop() {
         MediaUrls.validateResolved(url)?.let { error ->
@@ -113,12 +119,17 @@ class VideoPlayer(
         }
         var grabber: FFmpegFrameGrabber? = null
         try {
-            grabber = FFmpegFrameGrabber(url).apply {
-                pixelFormat = avutil.AV_PIX_FMT_RGBA
-                start()
+            val configure: (FFmpegFrameGrabber) -> Unit = {
+                it.pixelFormat = avutil.AV_PIX_FMT_RGBA
+                it.sampleRate = dev.zephbyte.premiere.client.audio.MovieAudio.SAMPLE_RATE
+                it.audioChannels = 2
+                it.sampleMode = org.bytedeco.javacv.FrameGrabber.SampleMode.SHORT
             }
-            val subtitleTrack = dev.zephbyte.premiere.client.subtitles.EmbeddedSubtitles.pickTrack(grabber)
-            hasSubtitleTrack = subtitleTrack != null
+            grabber = FFmpegFrameGrabber(url).also { configure(it); it.start() }
+            grabber = dev.zephbyte.premiere.client.audio.AudioTracks
+                .reopenForLanguage(grabber, url, audioLanguage, configure)
+            subtitles.discover(grabber)
+            val wantSubtitles = subtitles.any()
             val durationMs = grabber.lengthInTime / 1000
             var lastTsMs = 0L
             while (running) {
@@ -138,25 +149,39 @@ class VideoPlayer(
                     continue
                 }
                 if (abs(lastTsMs - target) > HARD_SEEK_MS) {
+                    audio.flush()
                     grabber.setTimestamp(target * 1000, true)
                 }
-                // doData=true also surfaces subtitle packets from the same stream.
-                val frame = grabber.grabFrame(false, true, true, false, subtitleTrack != null)
+                // When behind, skim with pixel conversion off: decoding alone
+                // is several times faster than decode + 1080p RGBA convert,
+                // and a near-realtime machine would otherwise never repay a
+                // post-seek deficit — the picture would lag the master clock
+                // (and the correctly-clocked audio) forever.
+                // doData=true also surfaces subtitle packets either way.
+                val skimming = target - lastTsMs > DROP_BEHIND_MS
+                val frame = grabber.grabFrame(true, true, !skimming, false, wantSubtitles)
                 if (frame == null) {
                     // EOF (or a demuxer hiccup): wait for a restart/seek
                     // instead of dying with the last frame frozen on screen.
                     Thread.sleep(200)
                     continue
                 }
-                if (frame.data != null) {
-                    if (subtitleTrack != null) {
-                        dev.zephbyte.premiere.client.subtitles.EmbeddedSubtitles.parsePacket(frame, subtitleTrack)
-                            ?.let { cue -> embeddedCues[cue.startMs] = cue }
+                if (frame.samples != null) {
+                    val samples = frame.samples?.getOrNull(0) as? java.nio.ShortBuffer
+                    if (samples != null) {
+                        val pcm = ShortArray(samples.remaining()).also { samples.duplicate().get(it) }
+                        // Stale chunks are dropped inside; live ones block
+                        // briefly when full, pacing decode at realtime.
+                        audio.enqueue(frame.timestamp / 1000, pcm)
                     }
                     continue
                 }
-                if (frame.image == null) continue
+                if (frame.data != null) {
+                    subtitles.collect(frame)
+                    continue
+                }
                 lastTsMs = frame.timestamp / 1000
+                if (skimming || frame.image == null) continue // unconverted; not drawable
                 if (lastTsMs < target - DROP_BEHIND_MS) continue // behind: drop
                 if (lastTsMs > target) {
                     Thread.sleep(min(lastTsMs - target, 200))
@@ -244,6 +269,7 @@ class VideoPlayer(
 
     override fun close() {
         running = false
+        audio.close()
         thread.interrupt()
     }
 }

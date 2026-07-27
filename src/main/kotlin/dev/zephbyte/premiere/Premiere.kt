@@ -1,11 +1,12 @@
 package dev.zephbyte.premiere
 
-import dev.zephbyte.premiere.command.MovieNightCommand
+import dev.zephbyte.premiere.command.PremiereCommand
 import dev.zephbyte.premiere.net.PremiereNet
 import dev.zephbyte.premiere.screen.ScreenManager
 import net.fabricmc.api.ModInitializer
 import net.minecraft.resources.Identifier
 import org.slf4j.LoggerFactory
+import dev.zephbyte.premiere.screen.SelectionTool
 
 /**
  * Server/common entrypoint.
@@ -21,9 +22,9 @@ class Premiere : ModInitializer {
     override fun onInitialize() {
         PremiereConfig.load()
         PremiereNet.registerCommon()
-        MovieNightCommand.register()
+        PremiereCommand.register()
         ScreenManager.init()
-        dev.zephbyte.premiere.screen.SelectionTool.register()
+        SelectionTool.register()
         LOGGER.info("Premiere initialized (no registry entries, vanilla clients unaffected)")
     }
 

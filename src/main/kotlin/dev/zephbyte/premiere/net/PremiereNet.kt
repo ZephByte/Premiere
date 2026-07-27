@@ -10,6 +10,7 @@ import net.minecraft.network.FriendlyByteBuf
 import net.minecraft.network.RegistryFriendlyByteBuf
 import net.minecraft.network.codec.StreamCodec
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload
+import dev.zephbyte.premiere.screen.ScreenManager
 
 /**
  * Snapshot of one screen, sent to video-capable clients only (Fabric drops
@@ -25,6 +26,8 @@ data class ScreenStatePayload(
     val screen: ScreenDefinition,
     val url: String,
     val subtitleUrl: String,
+    val audioLanguage: String,
+    val audioDistance: Float,
     val state: PlayState,
     val mediaPositionMs: Long,
     val volume: Float,
@@ -41,6 +44,8 @@ data class ScreenStatePayload(
         buf.writeEnum(screen.facing)
         buf.writeUtf(url)
         buf.writeUtf(subtitleUrl)
+        buf.writeUtf(audioLanguage)
+        buf.writeFloat(audioDistance)
         buf.writeEnum(state)
         buf.writeVarLong(mediaPositionMs)
         buf.writeFloat(volume)
@@ -62,6 +67,8 @@ data class ScreenStatePayload(
                     ),
                     url = buf.readUtf(),
                     subtitleUrl = buf.readUtf(),
+                    audioLanguage = buf.readUtf(),
+                    audioDistance = buf.readFloat(),
                     state = buf.readEnum(PlayState::class.java),
                     mediaPositionMs = buf.readVarLong(),
                     volume = buf.readFloat(),
@@ -108,10 +115,10 @@ object PremiereNet {
         PayloadTypeRegistry.serverboundPlay().register(ScreenReadyPayload.TYPE, ScreenReadyPayload.CODEC)
 
         ServerPlayNetworking.registerGlobalReceiver(RequestScreensPayload.TYPE) { _, context ->
-            dev.zephbyte.premiere.screen.ScreenManager.sendAllTo(context.player())
+            ScreenManager.sendAllTo(context.player())
         }
         ServerPlayNetworking.registerGlobalReceiver(ScreenReadyPayload.TYPE) { payload, context ->
-            dev.zephbyte.premiere.screen.ScreenManager.clientReportedReady(payload.screen, context.player())
+            ScreenManager.clientReportedReady(payload.screen, context.player())
         }
     }
 }

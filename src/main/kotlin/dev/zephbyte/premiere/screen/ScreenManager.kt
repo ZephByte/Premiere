@@ -44,6 +44,7 @@ object ScreenManager {
         }
         ServerLifecycleEvents.SERVER_STOPPING.register { _ ->
             AudioBridge.instance?.shutdownAll()
+            dev.zephbyte.premiere.upload.UploadServer.stop()
             server = null
         }
         ServerTickEvents.END_SERVER_TICK.register { server ->
@@ -77,8 +78,8 @@ object ScreenManager {
         return true
     }
 
-    fun play(server: MinecraftServer, screen: ManagedScreen, url: String) {
-        screen.playback.play(url)
+    fun play(server: MinecraftServer, screen: ManagedScreen, url: String, label: String = url) {
+        screen.playback.play(url, label)
         pushPlayback(server, screen)
     }
 
@@ -103,6 +104,43 @@ object ScreenManager {
     private fun pushPlayback(server: MinecraftServer, screen: ManagedScreen) {
         broadcast(server, screen)
         AudioBridge.instance?.onPlaybackChanged(server, screen.definition, screen.playback)
+    }
+
+    /** Plain-types snapshot of one screen for the staff dashboard. */
+    data class ScreenStatus(
+        val name: String,
+        val size: String,
+        val facing: String,
+        val state: String,
+        val label: String,
+        val positionSeconds: Long,
+        val volumePercent: Int,
+    )
+
+    /**
+     * Dashboard snapshot, completed on the server thread so HTTP threads never
+     * touch live game state directly.
+     */
+    fun statusSnapshot(): java.util.concurrent.CompletableFuture<List<ScreenStatus>> {
+        val server = this.server
+            ?: return java.util.concurrent.CompletableFuture.completedFuture(emptyList())
+        val future = java.util.concurrent.CompletableFuture<List<ScreenStatus>>()
+        server.execute {
+            future.complete(screens.values.map { screen ->
+                val d = screen.definition
+                val p = screen.playback
+                ScreenStatus(
+                    name = d.name,
+                    size = "${d.width}x${d.height}",
+                    facing = d.facing.serializedName,
+                    state = p.state.name,
+                    label = p.label,
+                    positionSeconds = p.currentPositionMs() / 1000,
+                    volumePercent = (p.volume * 100).toInt(),
+                )
+            })
+        }
+        return future
     }
 
     /** Late joiner / channel registration: send the full current state. */

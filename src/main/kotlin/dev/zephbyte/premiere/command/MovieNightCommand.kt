@@ -23,6 +23,10 @@ object MovieNightCommand {
         SharedSuggestionProvider.suggest(ScreenManager.all().map { it.definition.name }, builder)
     }
 
+    private val MOVIE_SUGGESTIONS = SuggestionProvider<CommandSourceStack> { _, builder ->
+        SharedSuggestionProvider.suggest(dev.zephbyte.premiere.upload.MovieLibrary.suggestions(), builder)
+    }
+
     fun register() {
         CommandRegistrationCallback.EVENT.register { dispatcher, _, _ ->
             dispatcher.register(
@@ -51,7 +55,8 @@ object MovieNightCommand {
                             .requires(MoviePerms::canControl)
                             .then(
                                 screenArg().then(
-                                    Commands.argument("url", StringArgumentType.greedyString())
+                                    Commands.argument("movie", StringArgumentType.greedyString())
+                                        .suggests(MOVIE_SUGGESTIONS)
                                         .executes(::play)
                                 )
                             )
@@ -75,6 +80,16 @@ object MovieNightCommand {
                                         .executes(::volume)
                                 )
                             )
+                    )
+                    .then(
+                        Commands.literal("upload")
+                            .requires(MoviePerms::canControl)
+                            .executes(::upload)
+                    )
+                    .then(
+                        Commands.literal("movies")
+                            .requires(MoviePerms::canControl)
+                            .executes(::movies)
                     )
                     .then(Commands.literal("list").executes(::list))
             )
@@ -130,25 +145,80 @@ object MovieNightCommand {
         return 1
     }
 
+    /**
+     * Plays a library name (resolved against the bucket and presigned) or, as
+     * the escape hatch, a pasted public URL. Resolution, DNS checks, and
+     * signing all block, so everything runs off the server thread.
+     */
     private fun play(context: CommandContext<CommandSourceStack>): Int {
         val source = context.source
         val screen = requireScreen(context) ?: return 0
-        val url = StringArgumentType.getString(context, "url").trim()
-        MediaUrls.validate(url)?.let {
-            source.sendFailure(Component.literal(it))
+        val input = StringArgumentType.getString(context, "movie").trim()
+        val server = source.server
+
+        fun fail(message: String) = server.execute { source.sendFailure(Component.literal(message)) }
+
+        Thread.startVirtualThread {
+            val isUrl = input.startsWith("http://", ignoreCase = true) ||
+                input.startsWith("https://", ignoreCase = true)
+            val url: String
+            val label: String
+            if (isUrl) {
+                val error = MediaUrls.validate(input) ?: MediaUrls.validateResolved(input)
+                if (error != null) {
+                    fail(error)
+                    return@startVirtualThread
+                }
+                url = input
+                label = input
+            } else {
+                if (!dev.zephbyte.premiere.PremiereConfig.uploadConfigured) {
+                    fail("No movie library configured (r2_* settings in config/premiere.json); paste a URL instead.")
+                    return@startVirtualThread
+                }
+                val key = try {
+                    dev.zephbyte.premiere.upload.MovieLibrary.resolve(input)
+                } catch (e: Exception) {
+                    fail("Could not reach the movie library: ${e.message}")
+                    return@startVirtualThread
+                }
+                if (key == null) {
+                    fail("No movie named '$input'. See /movienight movies, or upload with /movienight upload.")
+                    return@startVirtualThread
+                }
+                url = dev.zephbyte.premiere.upload.R2Storage.presignGet(key)
+                label = dev.zephbyte.premiere.upload.MovieLibrary.displayName(key)
+            }
+            server.execute {
+                ScreenManager.play(server, screen, url, label)
+                source.sendSuccess({ Component.literal("Playing '$label' on '${screen.definition.name}'") }, true)
+            }
+        }
+        return 1
+    }
+
+    private fun movies(context: CommandContext<CommandSourceStack>): Int {
+        val source = context.source
+        if (!dev.zephbyte.premiere.PremiereConfig.uploadConfigured) {
+            source.sendFailure(Component.literal("No movie library configured (r2_* settings in config/premiere.json)."))
             return 0
         }
         val server = source.server
-        // DNS resolution blocks; keep it off the server thread.
         Thread.startVirtualThread {
-            val error = MediaUrls.validateResolved(url)
-            server.execute {
-                if (error != null) {
-                    source.sendFailure(Component.literal(error))
-                    return@execute
+            val names = try {
+                dev.zephbyte.premiere.upload.R2Storage.listKeys().map {
+                    dev.zephbyte.premiere.upload.MovieLibrary.displayName(it)
                 }
-                ScreenManager.play(server, screen, url)
-                source.sendSuccess({ Component.literal("Playing on '${screen.definition.name}': $url") }, true)
+            } catch (e: Exception) {
+                server.execute { source.sendFailure(Component.literal("Could not reach the movie library: ${e.message}")) }
+                return@startVirtualThread
+            }
+            server.execute {
+                if (names.isEmpty()) {
+                    source.sendSuccess({ Component.literal("The library is empty. Add movies with /movienight upload.") }, false)
+                } else {
+                    source.sendSuccess({ Component.literal("Movies: ${names.joinToString(", ")}") }, false)
+                }
             }
         }
         return 1
@@ -181,6 +251,41 @@ object MovieNightCommand {
         return 1
     }
 
+    private fun upload(context: CommandContext<CommandSourceStack>): Int {
+        val source = context.source
+        if (!dev.zephbyte.premiere.PremiereConfig.uploadConfigured) {
+            source.sendFailure(
+                Component.literal(
+                    "Uploads aren't configured. Fill in the r2_* settings in config/premiere.json (see README)."
+                )
+            )
+            return 0
+        }
+        val token = dev.zephbyte.premiere.upload.UploadServer.mintToken()
+        if (token == null) {
+            source.sendFailure(Component.literal("Could not start the dashboard; check the server log."))
+            return 0
+        }
+        val base = dev.zephbyte.premiere.PremiereConfig.uploadPublicAddress.ifBlank {
+            "http://<this-server's-address>:${dev.zephbyte.premiere.PremiereConfig.uploadHttpPort}"
+        }
+        val url = "$base/dash?token=$token"
+        val link = Component.literal(url).withStyle { style ->
+            runCatching { style.withClickEvent(net.minecraft.network.chat.ClickEvent.OpenUrl(java.net.URI(url))) }
+                .getOrDefault(style)
+                .withUnderlined(true)
+        }
+        source.sendSuccess({
+            Component.literal("Dashboard link (valid 1 hour): ").append(link)
+        }, false)
+        if (dev.zephbyte.premiere.PremiereConfig.uploadPublicAddress.isBlank()) {
+            source.sendSuccess({
+                Component.literal("Tip: set upload_public_address in config/premiere.json to make this link clickable.")
+            }, false)
+        }
+        return 1
+    }
+
     private fun list(context: CommandContext<CommandSourceStack>): Int {
         val screens = ScreenManager.all()
         if (screens.isEmpty()) {
@@ -192,8 +297,8 @@ object MovieNightCommand {
             val p = screen.playback
             val status = when (p.state) {
                 PlayState.STOPPED -> "idle"
-                PlayState.PAUSED -> "paused at ${p.currentPositionMs() / 1000}s: ${p.url}"
-                PlayState.PLAYING -> "playing at ${p.currentPositionMs() / 1000}s: ${p.url}"
+                PlayState.PAUSED -> "paused at ${p.currentPositionMs() / 1000}s: ${p.label}"
+                PlayState.PLAYING -> "playing at ${p.currentPositionMs() / 1000}s: ${p.label}"
             }
             context.source.sendSuccess({
                 Component.literal(

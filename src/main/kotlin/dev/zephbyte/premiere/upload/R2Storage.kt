@@ -1,0 +1,176 @@
+package dev.zephbyte.premiere.upload
+
+import dev.zephbyte.premiere.PremiereConfig
+import java.net.URI
+import java.net.URLEncoder
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
+import java.security.MessageDigest
+import java.time.Duration
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
+
+/**
+ * The mod's entire R2 surface: presigned PUTs for the upload page, presigned
+ * GETs minted at play time, and bucket listing for the movie library.
+ *
+ * The bucket stays fully private — no public access, no r2.dev subdomain.
+ * Nothing is reachable without a signature, playback links expire on their
+ * own (so a leaked link dies within hours), and the credential never leaves
+ * this class except as a signature.
+ */
+object R2Storage {
+
+    /** Playback links outlive the longest movie night, then self-destruct. */
+    const val PLAYBACK_EXPIRY_S = 12 * 3600L
+
+    private const val EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+    private val AMZ_DATE: DateTimeFormatter =
+        DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC)
+
+    private val http: HttpClient by lazy {
+        HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()
+    }
+
+    private fun host() = "${PremiereConfig.r2AccountId}.r2.cloudflarestorage.com"
+
+    fun presignPut(key: String, expiresSeconds: Long): String = presign("PUT", key, expiresSeconds)
+
+    fun presignGet(key: String, expiresSeconds: Long = PLAYBACK_EXPIRY_S): String =
+        presign("GET", key, expiresSeconds)
+
+    data class R2Object(val key: String, val size: Long, val lastModified: String)
+
+    /** Lists bucket contents (first 1000; a movie bucket stays tiny). */
+    fun listObjects(): List<R2Object> {
+        val response = sendSigned("GET", null, "list-type=2")
+        if (response.statusCode() != 200) {
+            throw IllegalStateException("R2 list failed: HTTP ${response.statusCode()}: ${response.body().take(200)}")
+        }
+        return Regex("<Contents>(.*?)</Contents>", RegexOption.DOT_MATCHES_ALL)
+            .findAll(response.body())
+            .mapNotNull { entry ->
+                val block = entry.groupValues[1]
+                val key = Regex("<Key>(.*?)</Key>").find(block)?.groupValues?.get(1) ?: return@mapNotNull null
+                R2Object(
+                    key = unescapeXml(key),
+                    size = Regex("<Size>(\\d+)</Size>").find(block)?.groupValues?.get(1)?.toLong() ?: 0,
+                    lastModified = Regex("<LastModified>(.*?)</LastModified>").find(block)?.groupValues?.get(1) ?: "",
+                )
+            }
+            .toList()
+    }
+
+    fun listKeys(): List<String> = listObjects().map { it.key }
+
+    fun deleteObject(key: String) {
+        val response = sendSigned("DELETE", key, "")
+        if (response.statusCode() !in 200..299) {
+            throw IllegalStateException("R2 delete failed: HTTP ${response.statusCode()}: ${response.body().take(200)}")
+        }
+    }
+
+    /** Header-signed (SigV4) request to the bucket or an object in it. */
+    private fun sendSigned(method: String, key: String?, query: String): HttpResponse<String> {
+        val host = host()
+        val amzDate = AMZ_DATE.format(Instant.now())
+        val dateStamp = amzDate.substring(0, 8)
+        val scope = "$dateStamp/auto/s3/aws4_request"
+        val path = "/${PremiereConfig.r2Bucket}" + if (key != null) "/${encodeKey(key)}" else ""
+
+        val canonicalHeaders = "host:$host\nx-amz-content-sha256:$EMPTY_SHA256\nx-amz-date:$amzDate\n"
+        val signedHeaders = "host;x-amz-content-sha256;x-amz-date"
+        val canonicalRequest = listOf(
+            method, path, query, canonicalHeaders, signedHeaders, EMPTY_SHA256,
+        ).joinToString("\n")
+        val stringToSign = listOf(
+            "AWS4-HMAC-SHA256", amzDate, scope, hex(sha256(canonicalRequest.toByteArray())),
+        ).joinToString("\n")
+        val signature = hex(hmac(signingKey(dateStamp), stringToSign))
+
+        val uri = URI("https://$host$path" + if (query.isNotEmpty()) "?$query" else "")
+        val request = HttpRequest.newBuilder(uri)
+            .header("x-amz-date", amzDate)
+            .header("x-amz-content-sha256", EMPTY_SHA256)
+            .header(
+                "Authorization",
+                "AWS4-HMAC-SHA256 Credential=${PremiereConfig.r2AccessKeyId}/$scope, " +
+                    "SignedHeaders=$signedHeaders, Signature=$signature"
+            )
+            .timeout(Duration.ofSeconds(15))
+            .method(method, HttpRequest.BodyPublishers.noBody())
+            .build()
+        return http.send(request, HttpResponse.BodyHandlers.ofString())
+    }
+
+    private fun presign(method: String, key: String, expiresSeconds: Long, now: Instant = Instant.now()): String {
+        val host = host()
+        val path = "/${PremiereConfig.r2Bucket}/${encodeKey(key)}"
+        val amzDate = AMZ_DATE.format(now)
+        val dateStamp = amzDate.substring(0, 8)
+        val scope = "$dateStamp/auto/s3/aws4_request"
+
+        val query = listOf(
+            "X-Amz-Algorithm" to "AWS4-HMAC-SHA256",
+            "X-Amz-Credential" to "${PremiereConfig.r2AccessKeyId}/$scope",
+            "X-Amz-Date" to amzDate,
+            "X-Amz-Expires" to expiresSeconds.toString(),
+            "X-Amz-SignedHeaders" to "host",
+        ).joinToString("&") { (k, v) -> "$k=${rfc3986(v)}" }
+
+        val canonicalRequest = listOf(
+            method, path, query, "host:$host\n", "host", "UNSIGNED-PAYLOAD",
+        ).joinToString("\n")
+        val stringToSign = listOf(
+            "AWS4-HMAC-SHA256", amzDate, scope, hex(sha256(canonicalRequest.toByteArray())),
+        ).joinToString("\n")
+        val signature = hex(hmac(signingKey(dateStamp), stringToSign))
+
+        return "https://$host$path?$query&X-Amz-Signature=$signature"
+    }
+
+    private fun signingKey(dateStamp: String): ByteArray {
+        var key = hmac("AWS4${PremiereConfig.r2SecretAccessKey}".toByteArray(), dateStamp)
+        key = hmac(key, "auto")
+        key = hmac(key, "s3")
+        return hmac(key, "aws4_request")
+    }
+
+    /** Keep names URL- and chat-command-friendly. */
+    fun sanitizeName(name: String): String {
+        val base = name.substringAfterLast('/').substringAfterLast('\\')
+        val cleaned = base.replace(Regex("[^A-Za-z0-9._-]+"), "_").trim('_')
+        return cleaned.ifEmpty { "movie" }
+    }
+
+    private fun encodeKey(key: String): String =
+        key.split('/').joinToString("/") { rfc3986(it) }
+
+    /** S3 canonical encoding: like URL encoding but %20 for space and no '+'. */
+    private fun rfc3986(value: String): String =
+        URLEncoder.encode(value, Charsets.UTF_8)
+            .replace("+", "%20")
+            .replace("*", "%2A")
+            .replace("%7E", "~")
+
+    private fun unescapeXml(text: String): String = text
+        .replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"")
+        .replace("&#39;", "'").replace("&amp;", "&")
+
+    private fun sha256(bytes: ByteArray): ByteArray =
+        MessageDigest.getInstance("SHA-256").digest(bytes)
+
+    private fun hmac(key: ByteArray, text: String): ByteArray =
+        Mac.getInstance("HmacSHA256").run {
+            init(SecretKeySpec(key, "HmacSHA256"))
+            doFinal(text.toByteArray())
+        }
+
+    private fun hex(bytes: ByteArray): String =
+        bytes.joinToString("") { "%02x".format(it) }
+}

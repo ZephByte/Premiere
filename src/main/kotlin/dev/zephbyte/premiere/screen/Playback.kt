@@ -8,6 +8,9 @@ enum class PlayState { PLAYING, PAUSED, STOPPED }
  */
 class Playback {
     var url: String = ""
+
+    /** What staff typed (library name or pasted URL); for display only. */
+    var label: String = ""
     var state: PlayState = PlayState.STOPPED
     var volume: Float = 1f
 
@@ -18,8 +21,9 @@ class Playback {
     fun currentPositionMs(now: Long = System.currentTimeMillis()): Long =
         if (state == PlayState.PLAYING) positionMs + (now - anchorMs) else positionMs
 
-    fun play(url: String, now: Long = System.currentTimeMillis()) {
+    fun play(url: String, label: String = url, now: Long = System.currentTimeMillis()) {
         this.url = url
+        this.label = label
         positionMs = 0
         anchorMs = now
         state = PlayState.PLAYING
@@ -40,5 +44,6 @@ class Playback {
         state = PlayState.STOPPED
         positionMs = 0
         url = ""
+        label = ""
     }
 }

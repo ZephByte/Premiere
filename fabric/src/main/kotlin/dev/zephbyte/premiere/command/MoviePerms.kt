@@ -12,7 +12,8 @@ import net.minecraft.server.permissions.Permissions
  * (op level 2) otherwise. Console is always allowed.
  */
 object MoviePerms {
-    const val CONTROL_NODE = "movienight.control"
+    const val CONTROL_NODE = "premiere.control"
+    const val LEGACY_CONTROL_NODE = "movienight.control"
 
     private val luckPermsLoaded: Boolean by lazy {
         FabricLoader.getInstance().isModLoaded("luckperms")
@@ -34,6 +35,8 @@ object MoviePerms {
     private fun checkLuckPerms(uuid: java.util.UUID): Boolean {
         val luckPerms = net.luckperms.api.LuckPermsProvider.get()
         val user = luckPerms.userManager.getUser(uuid) ?: return false
-        return user.cachedData.permissionData.checkPermission(CONTROL_NODE).asBoolean()
+        val permissions = user.cachedData.permissionData
+        return permissions.checkPermission(CONTROL_NODE).asBoolean() ||
+            permissions.checkPermission(LEGACY_CONTROL_NODE).asBoolean()
     }
 }

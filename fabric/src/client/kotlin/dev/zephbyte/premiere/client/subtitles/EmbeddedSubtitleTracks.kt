@@ -17,6 +17,7 @@ import java.util.concurrent.ConcurrentSkipListMap
  */
 class EmbeddedSubtitleTracks {
 
+    @Volatile
     private var tracks: List<EmbeddedSubtitles.Track> = emptyList()
     private var trackByStream: Map<Int, EmbeddedSubtitles.Track> = emptyMap()
     private val cuesByStream = ConcurrentHashMap<Int, ConcurrentSkipListMap<Long, SubtitleCue>>()
@@ -34,6 +35,12 @@ class EmbeddedSubtitleTracks {
     }
 
     fun any(): Boolean = tracks.isNotEmpty()
+
+    /** Languages actually advertised by this film's decodable text tracks. */
+    fun availableLanguages(): List<String> = tracks
+        .map { it.language.trim().lowercase().ifEmpty { "und" } }
+        .distinct()
+        .sorted()
 
     /** Decode thread: feed every data frame through here. */
     fun collect(frame: Frame) {

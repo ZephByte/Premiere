@@ -17,6 +17,11 @@ import net.minecraft.client.Minecraft
 /** Client-side mirror of the server's screens, driven entirely by payloads. */
 object ClientScreens {
 
+    data class SubtitleAvailability(
+        val sidecar: Boolean,
+        val embeddedLanguages: List<String>,
+    )
+
     class ActiveScreen(@Volatile var definition: ScreenDefinition) {
         @Volatile
         var state: PlayState = PlayState.STOPPED
@@ -201,6 +206,25 @@ object ClientScreens {
     }
 
     fun renderable(): Collection<ActiveScreen> = screens.values
+
+    /** Subtitle choices for the nearest decoded movie in this dimension. */
+    fun nearestSubtitleAvailability(): SubtitleAvailability? {
+        val minecraft = Minecraft.getInstance()
+        val localPlayer = minecraft.player ?: return null
+        val level = minecraft.level ?: return null
+        val dimension = level.dimension().identifier().toString()
+        return screens.values.asSequence()
+            .filter { it.state != PlayState.STOPPED && it.definition.dimension == dimension }
+            .mapNotNull { active ->
+                val videoPlayer = active.player ?: return@mapNotNull null
+                val languages = videoPlayer.availableSubtitleLanguages()
+                if (active.subtitleUrl.isEmpty() && languages.isEmpty()) return@mapNotNull null
+                val distance = localPlayer.position().distanceToSqr(active.definition.faceCenter().toVec3())
+                distance to SubtitleAvailability(active.subtitleUrl.isNotEmpty(), languages)
+            }
+            .minByOrNull { it.first }
+            ?.second
+    }
 
     fun drainRetired(action: (VideoPlayer) -> Unit) {
         while (true) {

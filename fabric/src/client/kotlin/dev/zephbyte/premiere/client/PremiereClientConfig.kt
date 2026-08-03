@@ -17,8 +17,8 @@ object PremiereClientConfig {
         private set
 
     /**
-     * Preferred language for subtitle tracks embedded in the film, as an
-     * ISO 639 code the way releases tag them ("eng", "jpn", "spa", ...).
+     * Preferred language selected from tracks embedded in the current film,
+     * stored as its ISO 639 tag. "auto" asks the track scorer to choose.
      */
     @Volatile
     var subtitleLanguage: String = "eng"

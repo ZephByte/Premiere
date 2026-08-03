@@ -22,11 +22,6 @@ internal class SettingsSlider(
 
     private fun mapped(): Double = min + value * (max - min)
 
-    fun setMappedValue(updated: Double) {
-        value = ((updated.coerceIn(min, max) - min) / (max - min))
-        updateMessage()
-    }
-
     override fun updateMessage() {
         message = Component.literal("$label: ${format(mapped())}")
     }

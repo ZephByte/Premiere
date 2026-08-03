@@ -33,8 +33,38 @@ data class ScreenDefinition(
         return Vec3d(x, origin.y + height / 2.0, z)
     }
 
+    /**
+     * Where a view ray meets the visible face, or null when the viewer is
+     * behind it, looking away, outside its rectangle, or too far away.
+     * [direction] need not be normalized.
+     */
+    fun frontRayIntersection(eye: Vec3d, direction: Vec3d, maxDistance: Double): Vec3d? {
+        val face = faceCenter()
+        val eyeSide = (eye.x - face.x) * facing.stepX + (eye.z - face.z) * facing.stepZ
+        if (eyeSide <= RAY_EPSILON) return null
+
+        val towardFace = direction.x * facing.stepX + direction.z * facing.stepZ
+        if (towardFace >= -RAY_EPSILON) return null
+
+        val t = -eyeSide / towardFace
+        if (t < 0.0) return null
+        val hit = Vec3d(
+            eye.x + direction.x * t,
+            eye.y + direction.y * t,
+            eye.z + direction.z * t,
+        )
+        if (eye.distanceSqrTo(hit) > maxDistance * maxDistance) return null
+
+        val span = if (facing.spansX) hit.x - origin.x else hit.z - origin.z
+        val vertical = hit.y - origin.y
+        return hit.takeIf {
+            span in 0.0..width.toDouble() && vertical in 0.0..height.toDouble()
+        }
+    }
+
     companion object {
         const val MAX_EDGE = 64
+        private const val RAY_EPSILON = 1.0e-7
 
         /**
          * Builds a screen from two opposite corners of a flat vertical wall.

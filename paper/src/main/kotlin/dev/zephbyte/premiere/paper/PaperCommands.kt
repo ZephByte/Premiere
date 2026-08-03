@@ -29,6 +29,7 @@ import net.kyori.adventure.text.event.ClickEvent
 import net.kyori.adventure.text.format.NamedTextColor
 import net.kyori.adventure.text.format.TextDecoration
 import org.bukkit.Bukkit
+import org.bukkit.command.CommandSender
 import org.bukkit.entity.Player
 import java.util.concurrent.CompletableFuture
 
@@ -40,7 +41,8 @@ import java.util.concurrent.CompletableFuture
  */
 object PaperCommands {
 
-    const val CONTROL_NODE = "movienight.control"
+    const val CONTROL_NODE = "premiere.control"
+    const val LEGACY_CONTROL_NODE = "movienight.control"
 
     private val overwriteConfirms = ConfirmTracker()
     private lateinit var plugin: PremierePaperPlugin
@@ -52,8 +54,10 @@ object PaperCommands {
         registrar.register(buildTree("premiere").build(), "Premiere movie screens", listOf("pm", "movienight"))
     }
 
-    private fun canControl(source: CommandSourceStack): Boolean =
-        source.sender.hasPermission(CONTROL_NODE)
+    fun hasControlPermission(sender: CommandSender): Boolean =
+        sender.hasPermission(CONTROL_NODE) || sender.hasPermission(LEGACY_CONTROL_NODE)
+
+    private fun canControl(source: CommandSourceStack): Boolean = hasControlPermission(source.sender)
 
     private fun buildTree(root: String): LiteralArgumentBuilder<CommandSourceStack> =
         Commands.literal(root)

@@ -175,6 +175,8 @@ class VideoPlayer(
 
     fun hasEmbeddedSubtitles(): Boolean = subtitles.any()
 
+    fun availableSubtitleLanguages(): List<String> = subtitles.availableLanguages()
+
     fun activeEmbeddedCue(positionMs: Long): SubtitleCue? = subtitles.activeCue(positionMs)
 
     private fun decodeLoop() {

@@ -68,5 +68,5 @@ class PaperPlayerHandle(
 
     override fun sendActionBar(text: String) = player.sendActionBar(Component.text(text))
 
-    override fun hasControlPermission(): Boolean = player.hasPermission(PaperCommands.CONTROL_NODE)
+    override fun hasControlPermission(): Boolean = PaperCommands.hasControlPermission(player)
 }

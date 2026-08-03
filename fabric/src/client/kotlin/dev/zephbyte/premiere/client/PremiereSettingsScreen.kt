@@ -4,9 +4,9 @@ import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.GuiGraphicsExtractor
 import net.minecraft.client.gui.components.Button
 import net.minecraft.client.gui.components.CycleButton
-import net.minecraft.client.gui.components.EditBox
 import net.minecraft.client.gui.screens.Screen
 import net.minecraft.network.chat.Component
+import kotlin.math.roundToInt
 
 /**
  * In-game settings, SVC-style, so players never edit premiere-client.json by
@@ -15,99 +15,70 @@ import net.minecraft.network.chat.Component
  */
 class PremiereSettingsScreen(private val parent: Screen?) : Screen(Component.literal("Premiere Settings")) {
 
-    private var avSyncBox: EditBox? = null
-    private var avSyncSlider: SettingsSlider? = null
-
     override fun init() {
         val centerX = width / 2
-        var y = height / 2 - 88
+        val controlWidth = (width - 40).coerceIn(180, 220)
+        val left = centerX - controlWidth / 2
+        var y = (height / 2 - 72).coerceAtLeast(34)
 
         addRenderableWidget(
-            Button.builder(Component.literal("Subtitle Settings...")) {
+            Button.builder(Component.literal("Subtitles…")) {
                 Minecraft.getInstance().gui.setScreen(SubtitleSettingsScreen(this))
-            }.bounds(centerX - 100, y, 200, 20).build()
+            }.bounds(left, y, controlWidth, 20).build()
         )
-        y += 32
+        y += 24
 
-        // A/V trim: slider for feel, box for exact values. Applies live, so
-        // adjust while a film is playing until lips match voices.
-        avSyncSlider = addRenderableWidget(
+        addRenderableWidget(
             SettingsSlider(
-                centerX - 100, y, 144, "A/V Sync",
+                left, y, controlWidth, "A/V Sync",
                 -PremiereClientConfig.MAX_AV_SYNC_MS.toDouble(),
                 PremiereClientConfig.MAX_AV_SYNC_MS.toDouble(),
                 PremiereClientConfig.avSyncMs.toDouble(),
-                { "%+d".format(snap(it)) },
-            ) {
-                PremiereClientConfig.updateAvSyncMs(snap(it))
-                avSyncBox?.setValue(PremiereClientConfig.avSyncMs.toString())
-            }
+                { "%+d ms".format(snap(it)) },
+            ) { PremiereClientConfig.updateAvSyncMs(snap(it)) }
         )
-        val box = EditBox(font, centerX + 48, y, 52, 20, Component.literal("A/V Sync ms"))
-        box.setValue(PremiereClientConfig.avSyncMs.toString())
-        box.setResponder { text ->
-            text.toIntOrNull()?.let { typed ->
-                if (typed in -PremiereClientConfig.MAX_AV_SYNC_MS..PremiereClientConfig.MAX_AV_SYNC_MS) {
-                    PremiereClientConfig.updateAvSyncMs(typed)
-                    avSyncSlider?.setMappedValue(PremiereClientConfig.avSyncMs.toDouble())
-                }
-            }
-        }
-        addRenderableWidget(box)
-        avSyncBox = box
-        y += 26
+        y += 24
 
         addRenderableWidget(
             SettingsSlider(
-                centerX - 100, y, 200, "Movie Volume",
+                left, y, controlWidth, "Movie Volume",
                 0.0, 1.0, PremiereClientConfig.movieVolume.toDouble(),
                 { "%d%%".format((it * 100).toInt()) },
             ) { PremiereClientConfig.updateMovieVolume(it.toFloat()) }
         )
-        y += 26
+        y += 24
 
         addRenderableWidget(
-            CycleButton.builder<Boolean>(
-                { on -> Component.literal(if (on) "Black" else "Transparent") },
-                PremiereClientConfig.letterboxBlack,
-            ).withValues(true, false)
-                .create(centerX - 100, y, 200, 20, Component.literal("Letterbox Bars")) { _, value ->
+            CycleButton.onOffBuilder(PremiereClientConfig.letterboxBlack)
+                .create(left, y, controlWidth, 20, Component.literal("Black Letterbox")) { _, value ->
                     PremiereClientConfig.updateLetterboxBlack(value)
                 }
         )
-        y += 26
+        y += 24
 
         addRenderableWidget(
             CycleButton.onOffBuilder(PremiereClientConfig.hideCrosshairAtScreen)
-                .create(centerX - 100, y, 200, 20, Component.literal("Hide Crosshair At Screen")) { _, value ->
+                .create(left, y, controlWidth, 20, Component.literal("Hide Crosshair on Movies")) { _, value ->
                     PremiereClientConfig.updateHideCrosshair(value)
                 }
         )
-        y += 30
+        y += 28
 
         addRenderableWidget(
             Button.builder(Component.literal("Done")) { onClose() }
-                .bounds(centerX - 100, y, 200, 20)
+                .bounds(left, y, controlWidth, 20)
                 .build()
         )
     }
 
-    private fun snap(value: Double): Int = ((value / 25).toInt() * 25).coerceIn(
+    private fun snap(value: Double): Int = ((value / 25.0).roundToInt() * 25).coerceIn(
         -PremiereClientConfig.MAX_AV_SYNC_MS,
         PremiereClientConfig.MAX_AV_SYNC_MS,
     )
 
     override fun extractRenderState(graphics: GuiGraphicsExtractor, mouseX: Int, mouseY: Int, delta: Float) {
         super.extractRenderState(graphics, mouseX, mouseY, delta)
-        graphics.text(font, title.string, (width - font.width(title.string)) / 2, height / 2 - 110, 0xFFFFFFFF.toInt(), true)
-        graphics.text(
-            font,
-            "Voices after lips: increase. Voices before lips: decrease.",
-            width / 2 - 100,
-            height / 2 - 30,
-            0xFFA0A0A0.toInt(),
-            true,
-        )
+        graphics.centeredText(font, title, width / 2, (height / 2 - 96).coerceAtLeast(10), 0xFFFFFFFF.toInt())
     }
 
     override fun onClose() {

@@ -40,7 +40,7 @@ The full checklist, in order. Steps 1–2 get you a working theater; steps
    **Paper:** drop `Premiere-Paper` in `plugins`; the config is written to
    `plugins/Premiere/premiere.json` instead (same keys everywhere this README
    says `config/premiere.json`).
-2. Optional: grant `movienight.control` to staff. On Fabric, install
+2. Optional: grant `premiere.control` to staff. On Fabric, install
    LuckPerms; without it the commands fall back to requiring op level 2. On
    Paper it's a normal Bukkit permission (defaults to op), so any permissions
    plugin works out of the box. `/pm list` is open to everyone.
@@ -86,9 +86,10 @@ keep small non-copyrighted clips around (community ads, intro jokes,
 
 **Subtitles:** players with the client mod toggle them with a keybind
 (default **K**) and open the settings screen with another (default **,**) to
-pick language, size, and screen height with a live preview — per player,
-applied instantly (even mid-film), no config editing. Cues render at
-their chosen spot, synced to the master clock, whenever they're
+pick from the subtitle tracks discovered in the current movie, then adjust
+size and position with a clean live preview — per player, applied instantly
+(even mid-film), no language codes or config editing. Cues render at their
+chosen spot, synced to the master clock, whenever they're
 near the playing screen. Two sources, in priority order:
 
 1. A sidecar `.srt` uploaded with the same name as the movie (`bunny.mp4` +
@@ -98,8 +99,8 @@ near the playing screen. Two sources, in priority order:
 2. **Text subtitle tracks embedded in the file itself** (SRT/ASS in MKV,
    mov_text in MP4) — streamed out of the same connection as the picture,
    nothing to upload at all. Releases often carry many tracks; the client
-   picks the best full track in its preferred language (default `eng`,
-   changeable live in the settings screen),
+   picks the best full track in the selected language (default English,
+   changeable live from the available-track menu),
    avoiding "forced" tracks (foreign-dialogue-only) and preferring non-SDH.
 
 The one case needing the sidecar route: Blu-ray-style *bitmap* subtitles
@@ -200,7 +201,8 @@ your URL with the real client pipeline before the event, not just curl.
 
 ## Commands
 
-All gated behind `movienight.control` (or op level 2) except `list`.
+All gated behind `premiere.control` (or op level 2) except `list`.
+The old `movienight.control` node remains a deprecated compatibility alias.
 
 ```
 /pm define <screen> [corner1 corner2]        capture a wall (wand selection or coords);

@@ -1,8 +1,12 @@
 package dev.zephbyte.premiere.client.video
 
 import dev.zephbyte.premiere.client.ClientScreens
+import dev.zephbyte.premiere.toVec3
+import dev.zephbyte.premiere.toVec3d
 import dev.zephbyte.premiere.screen.PlayState
 import net.minecraft.client.Minecraft
+import net.minecraft.world.level.ClipContext
+import net.minecraft.world.phys.HitResult
 
 /**
  * "Is the player looking at a screen with a film up?" — a ray/rectangle test
@@ -28,24 +32,26 @@ object ScreenGaze {
             val definition = active.definition
             if (definition.dimension != dimension) continue
 
-            // Ray vs the wall's plane (the wall is one block thick; its center
-            // plane with a half-block margin is plenty for a crosshair test).
-            val origin = definition.origin
-            val alongX = definition.facing.spansX
-            val planeCoord = (if (alongX) origin.z else origin.x) + 0.5
-            val eyeCoord = if (alongX) eye.z else eye.x
-            val directionCoord = if (alongX) direction.z else direction.x
-            if (directionCoord == 0.0) continue
-            val t = (planeCoord - eyeCoord) / directionCoord
-            if (t < 0 || t > MAX_DISTANCE) continue
+            val target = definition.frontRayIntersection(
+                eye.toVec3d(),
+                direction.toVec3d(),
+                MAX_DISTANCE,
+            )?.toVec3() ?: continue
 
-            val hit = eye.add(direction.scale(t))
-            val span = if (alongX) hit.x - origin.x else hit.z - origin.z
-            val heightOnWall = hit.y - origin.y
-            if (span in -0.25..definition.width + 0.25 && heightOnWall in -0.25..definition.height + 0.25) {
-                return true
-            }
+            // The screen wall itself may be the raycast result at the target
+            // distance. Only a collision meaningfully closer than the visible
+            // face is an obstruction.
+            val blockHit = level.clip(
+                ClipContext(eye, target, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player)
+            )
+            if (blockHit.type != HitResult.Type.MISS &&
+                blockHit.location.distanceToSqr(target) > OCCLUSION_EPSILON_SQ
+            ) continue
+
+            return true
         }
         return false
     }
+
+    private const val OCCLUSION_EPSILON_SQ = 1.0e-4
 }

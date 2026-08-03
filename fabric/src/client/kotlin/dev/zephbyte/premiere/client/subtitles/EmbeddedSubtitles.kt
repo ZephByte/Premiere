@@ -6,6 +6,7 @@ import org.bytedeco.ffmpeg.global.avutil
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import org.bytedeco.javacv.Frame
 import java.nio.charset.StandardCharsets
+import java.util.Locale
 
 /**
  * Text subtitle tracks muxed into the film itself (S_TEXT tracks in MKV,
@@ -69,9 +70,7 @@ object EmbeddedSubtitles {
         var bestScore = Int.MIN_VALUE
         for (track in tracks) {
             var score = 0
-            if (track.language.isNotEmpty() &&
-                (track.language.startsWith(preferred) || preferred.startsWith(track.language))
-            ) score += 100
+            if (preferred != "auto" && languageMatches(track.language, preferred)) score += 100
             if (track.disposition and org.bytedeco.ffmpeg.global.avformat.AV_DISPOSITION_FORCED != 0) score -= 1000
             if (track.disposition and org.bytedeco.ffmpeg.global.avformat.AV_DISPOSITION_HEARING_IMPAIRED != 0) score -= 10
             if (track.disposition and org.bytedeco.ffmpeg.global.avformat.AV_DISPOSITION_DEFAULT != 0) score += 5
@@ -81,6 +80,18 @@ object EmbeddedSubtitles {
             }
         }
         return best
+    }
+
+    /** Treat ISO-639 two- and three-letter forms as the same language. */
+    fun languageMatches(first: String, second: String): Boolean =
+        canonicalLanguage(first) == canonicalLanguage(second)
+
+    private fun canonicalLanguage(value: String): String {
+        val base = value.trim().lowercase().substringBefore('-').substringBefore('_')
+        if (base.isEmpty()) return "und"
+        if (base.length != 2) return base
+        return runCatching { Locale.forLanguageTag(base).getISO3Language().lowercase() }
+            .getOrDefault(base)
     }
 
     /** Converts one data frame from the grabber into a cue, or null. */

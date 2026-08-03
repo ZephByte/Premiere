@@ -5,6 +5,9 @@ api-version: '1.21'
 description: In-world movie theater; players with the Premiere client mod see films on vanilla block walls.
 author: ZephByte
 permissions:
-  movienight.control:
+  premiere.control:
     description: Operate Premiere screens and playback
     default: op
+  movienight.control:
+    description: Deprecated alias for premiere.control
+    default: false

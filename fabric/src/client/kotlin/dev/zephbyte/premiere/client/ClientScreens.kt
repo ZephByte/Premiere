@@ -12,6 +12,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import dev.zephbyte.premiere.client.subtitles.SubtitleStore
 import dev.zephbyte.premiere.net.ScreenReadyPayload
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking
+import net.minecraft.client.Minecraft
 
 /** Client-side mirror of the server's screens, driven entirely by payloads. */
 object ClientScreens {
@@ -25,8 +26,51 @@ object ClientScreens {
 
         @Volatile
         var subtitleUrl: String = ""
+
+        @Volatile
+        var url: String = ""
+
+        @Volatile
+        var audioDistance: Float = 48f
+
+        @Volatile
+        var audioLanguage: String = ""
+
+        @Volatile
+        var generation: Int = 0
+
+        @Volatile
+        var mediaPositionMs: Long = 0
+
+        @Volatile
+        var receivedAtMs: Long = System.currentTimeMillis()
+
+        @Volatile
+        var volume: Float = 1f
+
+        @Volatile
+        var playerGeneration: Int = -1
+
+        /** State last applied to the local decoder; used to distinguish a
+         * real play/pause transition from a routine server heartbeat. */
+        @Volatile
+        var lastAppliedState: PlayState? = null
+
+        @Volatile
+        var retryAfterMs: Long = 0
+
+        fun currentMediaMs(now: Long = System.currentTimeMillis()): Long =
+            if (state == PlayState.PLAYING) mediaPositionMs + (now - receivedAtMs) else mediaPositionMs
     }
 
+    /**
+     * Do not open a network decoder just because a server has a playing screen.
+     * Screens outside the player's current dimension or theater area remain
+     * cheap snapshots until the player approaches them.
+     */
+    private const val MIN_ACTIVATION_DISTANCE = 128.0
+    private const val DEACTIVATION_HYSTERESIS = 32.0
+    private const val RETRY_DELAY_MS = 10_000L
     private val screens = ConcurrentHashMap<String, ActiveScreen>()
 
     // GPU textures must be released on the render thread; retired players are
@@ -41,47 +85,118 @@ object ClientScreens {
             return
         }
         val active = screens.computeIfAbsent(name) { ActiveScreen(msg.screen) }
+        val urlChanged = active.url != msg.url
+        val generationChanged = active.generation != msg.generation
         active.definition = msg.screen
         active.state = msg.state
         active.subtitleUrl = msg.subtitleUrl
+        active.url = msg.url
+        active.audioDistance = msg.audioDistance
+        active.audioLanguage = msg.audioLanguage
+        active.generation = msg.generation
+        active.mediaPositionMs = msg.mediaPositionMs
+        active.receivedAtMs = System.currentTimeMillis()
+        active.volume = msg.volume
+        if (urlChanged || generationChanged) active.retryAfterMs = 0
 
         when (msg.state) {
             PlayState.STOPPED -> retire(active)
-            PlayState.PLAYING, PlayState.PAUSED, PlayState.LOADED -> {
-                MediaUrls.validate(msg.url)?.let { error ->
-                    Premiere.LOGGER.warn("Rejecting broadcast URL for screen '{}': {}", name, error)
-                    retire(active)
-                    return
-                }
-                var player = active.player
-                // A dead decoder (error, bad stream) can't serve a replay of
-                // the same URL; rebuild instead of reusing the frozen frame.
-                if (player == null || player.url != msg.url || !player.isAlive) {
-                    retire(active)
-                    player = VideoPlayer(
-                        name,
-                        msg.url,
-                        msg.screen.faceCenter().toVec3(),
-                        msg.audioDistance,
-                        msg.audioLanguage,
-                    ) { reportReady(name) }
-                    active.player = player
-                }
-                // Every payload refreshes the sync anchor; the periodic server
-                // rebroadcast is what keeps long-running playback drift-free.
-                // LOADED behaves like paused-at-zero: decode one frame, park.
-                player.updateSync(msg.mediaPositionMs, msg.state == PlayState.PLAYING)
-                player.setVolume(msg.volume)
-            }
+            PlayState.PLAYING, PlayState.PAUSED, PlayState.LOADED ->
+                reconcile(active, sync = true, forceSeek = generationChanged)
         }
     }
 
+    /** Client tick: activate nearby snapshots and retire remote decoders. */
+    fun tick() {
+        screens.values.forEach { reconcile(it, sync = false, forceSeek = false) }
+    }
+
+    private fun reconcile(active: ActiveScreen, sync: Boolean, forceSeek: Boolean) {
+        if (active.state == PlayState.STOPPED) {
+            retire(active)
+            return
+        }
+        if (!shouldDecode(active)) {
+            retire(active)
+            return
+        }
+
+        MediaUrls.validate(active.url)?.let { error ->
+            Premiere.LOGGER.warn("Rejecting broadcast URL for screen '{}': {}", active.definition.name, error)
+            retire(active)
+            active.retryAfterMs = Long.MAX_VALUE
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        var player = active.player
+        if (player != null && player.url != active.url) {
+            // A deliberate movie change is not a decoder failure. Replace it
+            // immediately; applying RETRY_DELAY_MS here made every /pm load
+            // and URL switch sit on the spinner for exactly ten seconds.
+            retire(active)
+            active.retryAfterMs = 0
+            player = null
+        } else if (player != null && !player.isAlive) {
+            retire(active)
+            active.retryAfterMs = now + RETRY_DELAY_MS
+            player = null
+        }
+
+        var created = false
+        if (player == null) {
+            if (now < active.retryAfterMs) return
+            val name = active.definition.name
+            val generation = active.generation
+            player = VideoPlayer(
+                name,
+                active.url,
+                active.definition.faceCenter().toVec3(),
+                active.audioDistance,
+                active.audioLanguage,
+            ) { durationMs -> reportReady(name, generation, durationMs) }
+            active.player = player
+            active.playerGeneration = generation
+            active.retryAfterMs = 0
+            created = true
+        }
+
+        val generationChanged = active.playerGeneration != active.generation
+        val stateChanged = active.lastAppliedState != active.state
+        // Payloads are the only heartbeat source. Do not compare clocks every
+        // client tick: tiny scheduling differences would repeatedly reset the
+        // decoder and present as a one-second video hitch.
+        if (created || sync || stateChanged || generationChanged) {
+            player.updateSync(
+                active.currentMediaMs(now),
+                active.state == PlayState.PLAYING,
+                // A newly created player may be joining mid-film; both
+                // decoders must receive the initial seek epoch. Routine video
+                // catch-up seeks are deliberately not global seeks.
+                forceSeek = forceSeek || generationChanged || created,
+            )
+            active.playerGeneration = active.generation
+            active.lastAppliedState = active.state
+        }
+        player.setVolume(active.volume)
+    }
+
+    private fun shouldDecode(active: ActiveScreen): Boolean {
+        val minecraft = Minecraft.getInstance()
+        val player = minecraft.player ?: return false
+        val level = minecraft.level ?: return false
+        if (active.definition.dimension != level.dimension().identifier().toString()) return false
+        val base = maxOf(MIN_ACTIVATION_DISTANCE, active.audioDistance.toDouble())
+        val limit = base + if (active.player != null) DEACTIVATION_HYSTERESIS else 0.0
+        return player.position().distanceToSqr(active.definition.faceCenter().toVec3()) <= limit * limit
+    }
+
     /** First frame decoded: if the screen is in LOADED, tell the server. */
-    private fun reportReady(name: String) {
+    private fun reportReady(name: String, generation: Int, durationMs: Long) {
         val active = screens[name] ?: return
-        if (active.state != PlayState.LOADED) return
+        if (active.generation != generation) return
         if (ClientPlayNetworking.canSend(ScreenReadyPayload.TYPE)) {
-            ClientPlayNetworking.send(ScreenReadyPayload(name))
+            ClientPlayNetworking.send(ScreenReadyPayload(name, generation, durationMs))
         }
     }
 
@@ -103,6 +218,8 @@ object ClientScreens {
     private fun retire(active: ActiveScreen) {
         active.player?.let { retire(it) }
         active.player = null
+        active.playerGeneration = -1
+        active.lastAppliedState = null
     }
 
     private fun retire(player: VideoPlayer) {

@@ -14,6 +14,9 @@ class Playback {
     var state: PlayState = PlayState.STOPPED
     var volume: Float = 1f
 
+    /** Learned from a real client decoder; zero until media metadata arrives. */
+    var durationMs: Long = 0
+
     /**
      * Bumped on every fresh play/load (not pause/resume/volume) so the audio
      * side can tell "resume this session" apart from "start over at 0".
@@ -41,6 +44,7 @@ class Playback {
         audioLanguage: String = "",
         now: Long = System.currentTimeMillis(),
     ) {
+        if (this.url != url) durationMs = 0
         this.url = url
         this.label = label
         this.subtitleUrl = subtitleUrl
@@ -59,6 +63,7 @@ class Playback {
         audioLanguage: String = "",
         now: Long = System.currentTimeMillis(),
     ) {
+        if (this.url != url) durationMs = 0
         this.url = url
         this.label = label
         this.subtitleUrl = subtitleUrl
@@ -98,5 +103,6 @@ class Playback {
         label = ""
         subtitleUrl = ""
         audioLanguage = ""
+        durationMs = 0
     }
 }

@@ -13,12 +13,11 @@ import net.minecraft.commands.CommandSourceStack
 import net.minecraft.commands.Commands
 import net.minecraft.commands.SharedSuggestionProvider
 import net.minecraft.commands.arguments.coordinates.BlockPosArgument
-import net.minecraft.network.chat.Component
 
 /**
  * The command tree and shared target resolution. Handlers live beside it:
  * [ScreenCommands] (wand/define/undefine), [PlaybackCommands]
- * (play/load/pause/stop/seek/volume), [AdminCommands] (upload/movies/
+ * (play/load/pause/stop/seek/volume), [AdminCommands] (dashboard/movies/
  * reload/list).
  */
 object PremiereCommand {
@@ -129,9 +128,14 @@ object PremiereCommand {
                     )
             )
             .then(
-                Commands.literal("upload")
+                Commands.literal("dashboard")
                     .requires(MoviePerms::canControl)
-                    .executes(AdminCommands::upload)
+                    .executes(AdminCommands::dashboard)
+            )
+            .then(
+                Commands.literal("dash")
+                    .requires(MoviePerms::canControl)
+                    .executes(AdminCommands::dashboard)
             )
             .then(
                 Commands.literal("movies")
@@ -162,7 +166,7 @@ object PremiereCommand {
         return when (result) {
             is ScreenTargeting.Result.Target -> result.screen to result.rest
             is ScreenTargeting.Result.Fail -> {
-                source.sendFailure(Component.literal(result.message))
+                CommandFeedback.sendError(source, result.message)
                 null
             }
         }

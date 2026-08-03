@@ -9,7 +9,6 @@ import dev.zephbyte.premiere.upload.MediaResolver
 import dev.zephbyte.premiere.command.PlayArgs.parseAudioFlag
 import dev.zephbyte.premiere.util.Times
 import net.minecraft.commands.CommandSourceStack
-import net.minecraft.network.chat.Component
 
 /**
  * Playback control. Every command here accepts an optional leading screen
@@ -29,9 +28,10 @@ internal object PlaybackCommands {
                 if (resolved.subtitleUrl.isNotEmpty()) append(" (subtitles available)")
                 if (audioLanguage.isNotEmpty()) append(" [audio: $audioLanguage]")
             }
-            source.sendSuccess({
-                Component.literal("Playing '${resolved.label}' on '${screen.definition.name}'$notes")
-            }, true)
+            CommandFeedback.sendSuccess(
+                source,
+                "Now playing ${resolved.label} on ${screen.definition.name}$notes",
+            )
         }
         return 1
     }
@@ -40,7 +40,7 @@ internal object PlaybackCommands {
         val source = context.source
         val (screen, rest) = targetAndRest(source, args) ?: return 0
         if (rest.isEmpty()) {
-            source.sendFailure(Component.literal("Usage: /pm load [screen] <movie|url>"))
+            CommandFeedback.sendError(source, "Choose a movie: /pm load [screen] <movie or URL>")
             return 0
         }
         val (input, audioLanguage) = parseAudioFlag(rest)
@@ -50,11 +50,10 @@ internal object PlaybackCommands {
                 resolved.url, resolved.label, resolved.subtitleUrl, audioLanguage,
                 source.player?.uuid,
             )
-            source.sendSuccess({
-                Component.literal(
-                    "Loading '${resolved.label}' on '${screen.definition.name}' — you'll get a ping when it's buffered, then /pm play"
-                )
-            }, true)
+            CommandFeedback.sendSuccess(
+                source,
+                "Preparing ${resolved.label} on ${screen.definition.name}. You'll be notified when the first frame is ready.",
+            )
         }
         return 1
     }
@@ -64,20 +63,18 @@ internal object PlaybackCommands {
         val (screen, _) = targetAndRest(source, args) ?: return 0
         when (screen.playback.state) {
             PlayState.STOPPED -> {
-                source.sendFailure(Component.literal("Nothing is playing on '${screen.definition.name}'"))
+                CommandFeedback.sendError(source, "Nothing is playing on ${screen.definition.name}.")
                 return 0
             }
             PlayState.LOADED -> {
-                source.sendFailure(
-                    Component.literal("'${screen.definition.name}' is loaded, not playing — /pm play to roll")
-                )
+                CommandFeedback.sendError(source, "${screen.definition.name} is ready but has not started. Run /pm play to roll.")
                 return 0
             }
             else -> {}
         }
         val playing = ScreenManager.togglePause(screen)
         val verb = if (playing) "Resumed" else "Paused"
-        source.sendSuccess({ Component.literal("$verb '${screen.definition.name}'") }, true)
+        CommandFeedback.sendSuccess(source, "$verb ${screen.definition.name}.")
         return 1
     }
 
@@ -85,7 +82,7 @@ internal object PlaybackCommands {
         val source = context.source
         val (screen, _) = targetAndRest(source, args) ?: return 0
         ScreenManager.stop(screen)
-        source.sendSuccess({ Component.literal("Stopped '${screen.definition.name}'") }, true)
+        CommandFeedback.sendSuccess(source, "Stopped playback on ${screen.definition.name}.")
         return 1
     }
 
@@ -93,24 +90,23 @@ internal object PlaybackCommands {
         val source = context.source
         val (screen, rest) = targetAndRest(source, args) ?: return 0
         if (screen.playback.state == PlayState.STOPPED) {
-            source.sendFailure(Component.literal("Nothing is playing on '${screen.definition.name}'"))
+            CommandFeedback.sendError(source, "Nothing is playing on ${screen.definition.name}.")
             return 0
         }
         if (rest.isEmpty()) {
-            source.sendFailure(Component.literal("Usage: /pm seek [screen] <time> — 1:23:45, 5:30, 90, +30, -1:30"))
+            CommandFeedback.sendError(source, "Choose a time: /pm seek [screen] <1:23:45, 5:30, +30, or -1:30>")
             return 0
         }
         val target = Times.parseMs(rest, screen.playback.currentPositionMs())
         if (target == null) {
-            source.sendFailure(Component.literal("Can't read '$rest'. Use 1:23:45, 5:30, 90, +30, or -1:30."))
+            CommandFeedback.sendError(source, "Couldn't read '$rest'. Try 1:23:45, 5:30, 90, +30, or -1:30.")
             return 0
         }
         ScreenManager.seek(screen, target)
-        source.sendSuccess({
-            Component.literal(
-                "'${screen.playback.label}' seeked to ${Times.format(screen.playback.currentPositionMs())}"
-            )
-        }, true)
+        CommandFeedback.sendSuccess(
+            source,
+            "Moved ${screen.playback.label} to ${Times.format(screen.playback.currentPositionMs())}.",
+        )
         return 1
     }
 
@@ -119,11 +115,11 @@ internal object PlaybackCommands {
         val (screen, rest) = targetAndRest(source, args) ?: return 0
         val volume = rest.toIntOrNull()?.takeIf { it in 0..100 }
         if (volume == null) {
-            source.sendFailure(Component.literal("Usage: /pm volume [screen] <0-100>"))
+            CommandFeedback.sendError(source, "Volume must be from 0 to 100: /pm volume [screen] <0-100>")
             return 0
         }
         ScreenManager.setVolume(screen, volume / 100f)
-        source.sendSuccess({ Component.literal("Volume on '${screen.definition.name}' set to $volume%") }, true)
+        CommandFeedback.sendSuccess(source, "Set ${screen.definition.name} theater volume to $volume%.")
         return 1
     }
 
@@ -132,19 +128,18 @@ internal object PlaybackCommands {
         return when (screen.playback.state) {
             PlayState.LOADED, PlayState.PAUSED -> {
                 ScreenManager.start(screen)
-                source.sendSuccess({
-                    Component.literal("Rolling '${screen.playback.label}' on '${screen.definition.name}'")
-                }, true)
+                CommandFeedback.sendSuccess(
+                    source,
+                    "Rolling ${screen.playback.label} on ${screen.definition.name}.",
+                )
                 1
             }
             PlayState.PLAYING -> {
-                source.sendFailure(Component.literal("'${screen.definition.name}' is already playing"))
+                CommandFeedback.sendError(source, "${screen.definition.name} is already playing.")
                 0
             }
             PlayState.STOPPED -> {
-                source.sendFailure(
-                    Component.literal("Nothing loaded. Use /pm load <movie> first, or /pm play <movie>.")
-                )
+                CommandFeedback.sendError(source, "Nothing is loaded. Use /pm load <movie> or /pm play <movie>.")
                 0
             }
         }
@@ -164,7 +159,7 @@ internal object PlaybackCommands {
             val resolved = try {
                 MediaResolver.resolve(input)
             } catch (e: Exception) {
-                server.execute { source.sendFailure(Component.literal(e.message ?: "Could not resolve that")) }
+                server.execute { CommandFeedback.sendError(source, e.message ?: "Could not resolve that movie.") }
                 return@startVirtualThread
             }
             server.execute { onResolved(resolved) }

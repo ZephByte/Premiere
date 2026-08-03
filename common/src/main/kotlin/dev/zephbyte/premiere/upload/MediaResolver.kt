@@ -35,7 +35,7 @@ object MediaResolver {
             MovieLibrary.resolve(input)
         } catch (e: Exception) {
             throw ResolveException("Could not reach the movie library: ${e.message}")
-        } ?: throw ResolveException("No movie named '$input'. See /pm movies, or upload with /pm upload.")
+        } ?: throw ResolveException("No movie named '$input'. See /pm movies, or add it through /pm dashboard.")
         val subtitleUrl = MovieLibrary.subtitleKeyFor(key)?.let { R2Storage.presignGet(it) } ?: ""
         return Resolved(R2Storage.presignGet(key), MovieLibrary.displayName(key), subtitleUrl)
     }

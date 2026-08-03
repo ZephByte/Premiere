@@ -10,6 +10,8 @@ import java.nio.file.Path
  */
 object PremiereClientConfig {
 
+    const val MAX_AV_SYNC_MS = 3_000
+
     @Volatile
     var subtitlesEnabled: Boolean = false
         private set
@@ -38,11 +40,9 @@ object PremiereClientConfig {
         private set
 
     /**
-     * Per-player A/V trim: how much this client delays its video (and
-     * subtitles) to land on the audio actually reaching its ears. The delay
-     * between the server sending audio and a player hearing it is
-     * per-connection (network + SVC's client buffer), so no server-side
-     * constant can be right for everyone — this is the knob that can.
+     * Per-player A/V trim. Positive values delay video/subtitles; negative
+     * values delay PCM. Delaying whichever track is early keeps both decoder
+     * timelines at or behind the authoritative server clock.
      */
     @Volatile
     var avSyncMs: Int = 0
@@ -51,6 +51,11 @@ object PremiereClientConfig {
     /** Fill unused screen area behind the picture with black (vs transparent). */
     @Volatile
     var letterboxBlack: Boolean = true
+        private set
+
+    /** Per-player gain applied after the staff-controlled source volume. */
+    @Volatile
+    var movieVolume: Float = 1.0f
         private set
 
     fun toggleSubtitles(): Boolean {
@@ -88,7 +93,14 @@ object PremiereClientConfig {
     }
 
     fun updateAvSyncMs(value: Int) {
-        avSyncMs = value.coerceIn(-1000, 1000)
+        val updated = value.coerceIn(-MAX_AV_SYNC_MS, MAX_AV_SYNC_MS)
+        if (updated == avSyncMs) return
+        dev.zephbyte.premiere.Premiere.LOGGER.info(
+            "Premiere sync setting changed {}ms -> {}ms (positive delays video)",
+            avSyncMs,
+            updated,
+        )
+        avSyncMs = updated
         save()
     }
 
@@ -97,17 +109,56 @@ object PremiereClientConfig {
         save()
     }
 
+    fun updateMovieVolume(value: Float) {
+        movieVolume = value.coerceIn(0f, 1f)
+        save()
+    }
+
     private fun path(): Path = FabricLoader.getInstance().configDir.resolve("premiere-client.json")
 
     fun load() {
-        JsonConfig.read(path())?.let { o ->
-            o["subtitles"]?.let { subtitlesEnabled = it.asBoolean }
-            o["subtitle_language"]?.let { subtitleLanguage = it.asString.lowercase() }
-            o["hide_crosshair_at_screen"]?.let { hideCrosshairAtScreen = it.asBoolean }
-            o["subtitle_scale"]?.let { subtitleScale = it.asFloat.coerceIn(0.5f, 2.5f) }
-            o["subtitle_bottom_percent"]?.let { subtitleBottomPercent = it.asInt.coerceIn(2, 40) }
-            o["av_sync_ms"]?.let { avSyncMs = it.asInt.coerceIn(-1000, 1000) }
-            o["letterbox_black"]?.let { letterboxBlack = it.asBoolean }
+        val objectFromDisk = try {
+            JsonConfig.readOrThrow(path())
+        } catch (e: Exception) {
+            dev.zephbyte.premiere.Premiere.LOGGER.error(
+                "Premiere client config is invalid; using defaults and leaving the file untouched",
+                e,
+            )
+            return
+        }
+        val previousSubtitlesEnabled = subtitlesEnabled
+        val previousSubtitleLanguage = subtitleLanguage
+        val previousHideCrosshair = hideCrosshairAtScreen
+        val previousSubtitleScale = subtitleScale
+        val previousSubtitleBottomPercent = subtitleBottomPercent
+        val previousAvSyncMs = avSyncMs
+        val previousLetterboxBlack = letterboxBlack
+        val previousMovieVolume = movieVolume
+        try {
+            objectFromDisk?.let { o ->
+                o["subtitles"]?.let { subtitlesEnabled = it.asBoolean }
+                o["subtitle_language"]?.let { subtitleLanguage = it.asString.lowercase() }
+                o["hide_crosshair_at_screen"]?.let { hideCrosshairAtScreen = it.asBoolean }
+                o["subtitle_scale"]?.let { subtitleScale = it.asFloat.coerceIn(0.5f, 2.5f) }
+                o["subtitle_bottom_percent"]?.let { subtitleBottomPercent = it.asInt.coerceIn(2, 40) }
+                o["av_sync_ms"]?.let { avSyncMs = it.asInt.coerceIn(-MAX_AV_SYNC_MS, MAX_AV_SYNC_MS) }
+                o["letterbox_black"]?.let { letterboxBlack = it.asBoolean }
+                o["movie_volume"]?.let { movieVolume = it.asFloat.coerceIn(0f, 1f) }
+            }
+        } catch (e: Exception) {
+            subtitlesEnabled = previousSubtitlesEnabled
+            subtitleLanguage = previousSubtitleLanguage
+            hideCrosshairAtScreen = previousHideCrosshair
+            subtitleScale = previousSubtitleScale
+            subtitleBottomPercent = previousSubtitleBottomPercent
+            avSyncMs = previousAvSyncMs
+            letterboxBlack = previousLetterboxBlack
+            movieVolume = previousMovieVolume
+            dev.zephbyte.premiere.Premiere.LOGGER.error(
+                "Premiere client config values are invalid; using defaults and leaving the file untouched",
+                e,
+            )
+            return
         }
         save() // keep the file discoverable as new keys appear
     }
@@ -120,5 +171,6 @@ object PremiereClientConfig {
         addProperty("subtitle_bottom_percent", subtitleBottomPercent)
         addProperty("av_sync_ms", avSyncMs)
         addProperty("letterbox_black", letterboxBlack)
+        addProperty("movie_volume", movieVolume)
     }
 }

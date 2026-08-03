@@ -17,8 +17,8 @@ jobs:
       - name: Verify tag matches mod_version
         run: |
           MOD_VERSION=$(grep '^mod_version=' gradle.properties | cut -d'=' -f2)
-          if [ "${{ github.ref_name }}" != "$MOD_VERSION" ]; then
-            echo "::error::Tag '${{ github.ref_name }}' does not match mod_version '$MOD_VERSION' in gradle.properties"
+          if [ "${{ github.ref_name }}" != "v$MOD_VERSION" ]; then
+            echo "::error::Tag '${{ github.ref_name }}' does not match v$MOD_VERSION from gradle.properties"
             exit 1
           fi
 

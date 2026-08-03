@@ -29,6 +29,11 @@ dependencies {
     compileOnly("com.google.code.gson:gson:2.11.0")
     compileOnly("org.slf4j:slf4j-api:2.0.16")
     compileOnly("io.netty:netty-buffer:4.1.118.Final")
+
+    testImplementation(kotlin("test-junit5"))
+    testImplementation("com.google.code.gson:gson:2.11.0")
+    testImplementation("io.netty:netty-buffer:4.1.118.Final")
+    testRuntimeOnly("org.slf4j:slf4j-simple:2.0.16")
 }
 
 tasks.withType<JavaCompile>().configureEach {
@@ -38,4 +43,8 @@ tasks.withType<JavaCompile>().configureEach {
 
 tasks.withType<KotlinCompile>().configureEach {
     compilerOptions.jvmTarget.set(JvmTarget.fromTarget(targetJavaVersion.toString()))
+}
+
+tasks.test {
+    useJUnitPlatform()
 }

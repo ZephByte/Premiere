@@ -23,7 +23,7 @@ object PremiereMessenger {
         messenger.registerIncomingPluginChannel(plugin, PremiereWire.SCREEN_READY) { _, player, bytes ->
             try {
                 val msg = PremiereWire.readScreenReady(Unpooled.wrappedBuffer(bytes))
-                ScreenManager.clientReportedReady(msg.screen, player.uniqueId)
+                ScreenManager.clientReportedReady(msg.screen, msg.generation, msg.durationMs, player.uniqueId)
             } catch (e: Exception) {
                 PremiereCore.LOGGER.warn("Bad screen_ready payload from {}: {}", player.name, e.message)
             }

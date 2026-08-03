@@ -10,7 +10,6 @@ import dev.zephbyte.premiere.toScreenPos
 import dev.zephbyte.premiere.toVec3d
 import net.minecraft.commands.CommandSourceStack
 import net.minecraft.commands.arguments.coordinates.BlockPosArgument
-import net.minecraft.network.chat.Component
 
 /** Screen geometry: wand selection, define (with overwrite confirm), undefine. */
 internal object ScreenCommands {
@@ -21,19 +20,18 @@ internal object ScreenCommands {
         val source = context.source
         val player = source.player
         if (player == null) {
-            source.sendFailure(Component.literal("Only players can use the selection wand"))
+            CommandFeedback.sendError(source, "The selection wand can only be used in-game.")
             return 0
         }
         val on = SelectionTool.toggle(player.uuid)
-        source.sendSuccess({
-            Component.literal(
-                if (on) {
-                    "Selection mode ON: left-click one corner of the wall, right-click the opposite corner, then /pm define <name>. Run /pm wand again to cancel."
-                } else {
-                    "Selection mode off"
-                }
-            )
-        }, false)
+        CommandFeedback.sendInfo(
+            source,
+            if (on) {
+                "Selection mode enabled. Left-click one wall corner, right-click the opposite corner, then run /pm define <name>."
+            } else {
+                "Selection mode disabled."
+            },
+        )
         return 1
     }
 
@@ -47,16 +45,14 @@ internal object ScreenCommands {
         val source = context.source
         val player = source.player
         if (player == null) {
-            source.sendFailure(Component.literal("Console must pass corners: /pm define <name> <corner1> <corner2>"))
+            CommandFeedback.sendError(source, "Console usage: /pm define <name> <corner1> <corner2>")
             return 0
         }
         val selection = SelectionTool.selectionOf(player.uuid)
         val corner1 = selection?.corner1
         val corner2 = selection?.corner2
         if (selection == null || corner1 == null || corner2 == null) {
-            source.sendFailure(
-                Component.literal("No selection. Run /pm wand and click both corners first (or pass coordinates).")
-            )
+            CommandFeedback.sendError(source, "No complete selection. Run /pm wand and click both wall corners first.")
             return 0
         }
         val result = define(context, corner1, corner2, selection.dimension ?: "")
@@ -72,39 +68,41 @@ internal object ScreenCommands {
     ): Int {
         val source = context.source
         val name = StringArgumentType.getString(context, "screen")
-        if (ScreenManager.get(name) != null && !confirmOverwrite(source, name)) return 0
         if (dimension != source.level.dimension().identifier().toString()) {
-            source.sendFailure(Component.literal("Selection is in another dimension; reselect the wall here"))
+            CommandFeedback.sendError(source, "That selection is in another dimension. Select the wall again here.")
             return 0
         }
         val definition = try {
             ScreenDefinition.fromCorners(name, dimension, corner1, corner2, source.position.toVec3d())
         } catch (e: IllegalArgumentException) {
-            source.sendFailure(Component.literal(e.message ?: "Invalid screen corners"))
+            CommandFeedback.sendError(source, e.message ?: "Those screen corners are invalid.")
             return 0
         }
-        ScreenManager.define(definition)
-        source.sendSuccess({
-            Component.literal(
-                "Defined screen '$name': ${definition.width}x${definition.height} facing ${definition.facing.serializedName}"
-            )
-        }, true)
+        val replacing = ScreenManager.get(name) != null
+        if (replacing && !confirmOverwrite(source, name)) return 0
+        val saved = if (replacing) ScreenManager.redefine(definition) else ScreenManager.define(definition)
+        if (!saved) {
+            CommandFeedback.sendError(source, "Couldn't save $name. The previous screen is unchanged; check the server log.")
+            return 0
+        }
+        CommandFeedback.sendSuccess(
+            source,
+            "Defined $name — ${definition.width}×${definition.height}, facing ${definition.facing.serializedName}.",
+        )
         return 1
     }
 
     /**
      * Overwriting an existing screen takes the same command twice within 30s.
-     * On the confirming run the old screen is removed here; returns whether
-     * the define may proceed.
+     * Validation happens before this confirmation. The manager then swaps the
+     * definition in one step, so an invalid replacement cannot erase the old
+     * screen.
      */
     private fun confirmOverwrite(source: CommandSourceStack, name: String): Boolean {
         if (!overwriteConfirms.confirm(source.textName, name)) {
-            source.sendFailure(
-                Component.literal("Screen '$name' already exists. Run the same command again within 30s to overwrite it.")
-            )
+            CommandFeedback.sendError(source, "$name already exists. Repeat the command within 30 seconds to replace it.")
             return false
         }
-        ScreenManager.undefine(name)
         return true
     }
 
@@ -113,11 +111,14 @@ internal object ScreenCommands {
         val name = StringArgumentType.getString(context, "screen")
         val screen = ScreenManager.get(name)
         if (screen == null) {
-            source.sendFailure(Component.literal("No screen named '$name'. See /pm list"))
+            CommandFeedback.sendError(source, "No screen is named $name. Run /pm list to see defined screens.")
             return 0
         }
-        ScreenManager.undefine(screen.definition.name)
-        source.sendSuccess({ Component.literal("Removed screen '${screen.definition.name}'") }, true)
+        if (!ScreenManager.undefine(screen.definition.name)) {
+            CommandFeedback.sendError(source, "Couldn't remove $name. It is unchanged; check the server log.")
+            return 0
+        }
+        CommandFeedback.sendSuccess(source, "Removed screen ${screen.definition.name}.")
         return 1
     }
 }

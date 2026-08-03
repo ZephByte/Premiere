@@ -131,7 +131,8 @@ object PaperCommands {
                             .executes { volume(it, StringArgumentType.getString(it, "args")) }
                     )
             )
-            .then(Commands.literal("upload").requires(::canControl).executes(::upload))
+            .then(Commands.literal("dashboard").requires(::canControl).executes(::dashboard))
+            .then(Commands.literal("dash").requires(::canControl).executes(::dashboard))
             .then(Commands.literal("movies").requires(::canControl).executes(::movies))
             .then(Commands.literal("reload").requires(::canControl).executes(::reload))
             .then(Commands.literal("list").executes(::list))
@@ -152,11 +153,30 @@ object PaperCommands {
 
     // --- messaging (same wording as the Fabric side) ---
 
-    private fun ok(source: CommandSourceStack, text: String) =
-        source.sender.sendMessage(Component.text(text))
+    private fun prefix(): Component = Component.text("Premiere ", NamedTextColor.DARK_PURPLE)
+        .decorate(TextDecoration.BOLD)
 
-    private fun fail(source: CommandSourceStack, text: String) =
-        source.sender.sendMessage(Component.text(text, NamedTextColor.RED))
+    private fun success(text: String): Component = prefix()
+        .append(Component.text("✓ ", NamedTextColor.GREEN))
+        .append(Component.text(text, NamedTextColor.GRAY))
+
+    private fun info(text: String): Component = prefix()
+        .append(Component.text("• ", NamedTextColor.AQUA))
+        .append(Component.text(text, NamedTextColor.GRAY))
+
+    private fun error(text: String): Component = prefix()
+        .append(Component.text("✕ ", NamedTextColor.RED))
+        .append(Component.text(text, NamedTextColor.RED))
+
+    private fun command(label: String, command: String): Component = Component.text(label, NamedTextColor.AQUA)
+        .decorate(TextDecoration.UNDERLINED)
+        .clickEvent(ClickEvent.suggestCommand(command))
+
+    private fun ok(source: CommandSourceStack, text: String) = source.sender.sendMessage(success(text))
+
+    private fun note(source: CommandSourceStack, text: String) = source.sender.sendMessage(info(text))
+
+    private fun fail(source: CommandSourceStack, text: String) = source.sender.sendMessage(error(text))
 
     private fun playerOf(source: CommandSourceStack): Player? = source.executor as? Player
 
@@ -183,16 +203,16 @@ object PaperCommands {
         val source = context.source
         val player = playerOf(source)
         if (player == null) {
-            fail(source, "Only players can use the selection wand")
+            fail(source, "The selection wand can only be used in-game.")
             return 0
         }
         val on = SelectionTool.toggle(player.uniqueId)
         ok(
             source,
             if (on) {
-                "Selection mode ON: left-click one corner of the wall, right-click the opposite corner, then /pm define <name>. Run /pm wand again to cancel."
+                "Selection mode enabled. Left-click one wall corner, right-click the opposite corner, then run /pm define <name>."
             } else {
-                "Selection mode off"
+                "Selection mode disabled."
             }
         )
         return 1
@@ -221,7 +241,7 @@ object PaperCommands {
         val corner1 = selection?.corner1
         val corner2 = selection?.corner2
         if (selection == null || corner1 == null || corner2 == null) {
-            fail(source, "No selection. Run /pm wand and click both corners first (or pass coordinates).")
+            fail(source, "No complete selection. Run /pm wand and click both wall corners first.")
             return 0
         }
         val result = define(context, corner1, corner2, selection.dimension ?: "")
@@ -237,9 +257,8 @@ object PaperCommands {
     ): Int {
         val source = context.source
         val name = StringArgumentType.getString(context, "screen")
-        if (ScreenManager.get(name) != null && !confirmOverwrite(source, name)) return 0
         if (dimension != source.location.world.key.toString()) {
-            fail(source, "Selection is in another dimension; reselect the wall here")
+            fail(source, "That selection is in another dimension. Select the wall again here.")
             return 0
         }
         val viewer = playerOf(source)?.location?.let { Vec3d(it.x, it.y, it.z) }
@@ -250,17 +269,22 @@ object PaperCommands {
             fail(source, e.message ?: "Invalid screen corners")
             return 0
         }
-        ScreenManager.define(definition)
-        ok(source, "Defined screen '$name': ${definition.width}x${definition.height} facing ${definition.facing.serializedName}")
+        val replacing = ScreenManager.get(name) != null
+        if (replacing && !confirmOverwrite(source, name)) return 0
+        val saved = if (replacing) ScreenManager.redefine(definition) else ScreenManager.define(definition)
+        if (!saved) {
+            fail(source, "Couldn't save $name. The previous screen is unchanged; check the server log.")
+            return 0
+        }
+        ok(source, "Defined $name — ${definition.width}×${definition.height}, facing ${definition.facing.serializedName}.")
         return 1
     }
 
     private fun confirmOverwrite(source: CommandSourceStack, name: String): Boolean {
         if (!overwriteConfirms.confirm(source.sender.name, name)) {
-            fail(source, "Screen '$name' already exists. Run the same command again within 30s to overwrite it.")
+            fail(source, "$name already exists. Repeat the command within 30 seconds to replace it.")
             return false
         }
-        ScreenManager.undefine(name)
         return true
     }
 
@@ -269,11 +293,14 @@ object PaperCommands {
         val name = StringArgumentType.getString(context, "screen")
         val screen = ScreenManager.get(name)
         if (screen == null) {
-            fail(source, "No screen named '$name'. See /pm list")
+            fail(source, "No screen is named $name. Run /pm list to see defined screens.")
             return 0
         }
-        ScreenManager.undefine(screen.definition.name)
-        ok(source, "Removed screen '${screen.definition.name}'")
+        if (!ScreenManager.undefine(screen.definition.name)) {
+            fail(source, "Couldn't remove $name. It is unchanged; check the server log.")
+            return 0
+        }
+        ok(source, "Removed screen ${screen.definition.name}.")
         return 1
     }
 
@@ -290,7 +317,7 @@ object PaperCommands {
                 if (resolved.subtitleUrl.isNotEmpty()) append(" (subtitles available)")
                 if (audioLanguage.isNotEmpty()) append(" [audio: $audioLanguage]")
             }
-            ok(source, "Playing '${resolved.label}' on '${screen.definition.name}'$notes")
+            ok(source, "Now playing ${resolved.label} on ${screen.definition.name}$notes")
         }
         return 1
     }
@@ -299,7 +326,7 @@ object PaperCommands {
         val source = context.source
         val (screen, rest) = targetAndRest(source, args) ?: return 0
         if (rest.isEmpty()) {
-            fail(source, "Usage: /pm load [screen] <movie|url>")
+            fail(source, "Choose a movie: /pm load [screen] <movie or URL>")
             return 0
         }
         val (input, audioLanguage) = parseAudioFlag(rest)
@@ -309,7 +336,7 @@ object PaperCommands {
                 resolved.url, resolved.label, resolved.subtitleUrl, audioLanguage,
                 playerOf(source)?.uniqueId,
             )
-            ok(source, "Loading '${resolved.label}' on '${screen.definition.name}' — you'll get a ping when it's buffered, then /pm play")
+            ok(source, "Preparing ${resolved.label} on ${screen.definition.name}. You'll be notified when the first frame is ready.")
         }
         return 1
     }
@@ -319,17 +346,17 @@ object PaperCommands {
         val (screen, _) = targetAndRest(source, args) ?: return 0
         when (screen.playback.state) {
             PlayState.STOPPED -> {
-                fail(source, "Nothing is playing on '${screen.definition.name}'")
+                fail(source, "Nothing is playing on ${screen.definition.name}.")
                 return 0
             }
             PlayState.LOADED -> {
-                fail(source, "'${screen.definition.name}' is loaded, not playing — /pm play to roll")
+                fail(source, "${screen.definition.name} is ready but has not started. Run /pm play to roll.")
                 return 0
             }
             else -> {}
         }
         val playing = ScreenManager.togglePause(screen)
-        ok(source, "${if (playing) "Resumed" else "Paused"} '${screen.definition.name}'")
+        ok(source, "${if (playing) "Resumed" else "Paused"} ${screen.definition.name}.")
         return 1
     }
 
@@ -337,7 +364,7 @@ object PaperCommands {
         val source = context.source
         val (screen, _) = targetAndRest(source, args) ?: return 0
         ScreenManager.stop(screen)
-        ok(source, "Stopped '${screen.definition.name}'")
+        ok(source, "Stopped playback on ${screen.definition.name}.")
         return 1
     }
 
@@ -345,20 +372,20 @@ object PaperCommands {
         val source = context.source
         val (screen, rest) = targetAndRest(source, args) ?: return 0
         if (screen.playback.state == PlayState.STOPPED) {
-            fail(source, "Nothing is playing on '${screen.definition.name}'")
+            fail(source, "Nothing is playing on ${screen.definition.name}.")
             return 0
         }
         if (rest.isEmpty()) {
-            fail(source, "Usage: /pm seek [screen] <time> — 1:23:45, 5:30, 90, +30, -1:30")
+            fail(source, "Choose a time: /pm seek [screen] <1:23:45, 5:30, +30, or -1:30>")
             return 0
         }
         val target = Times.parseMs(rest, screen.playback.currentPositionMs())
         if (target == null) {
-            fail(source, "Can't read '$rest'. Use 1:23:45, 5:30, 90, +30, or -1:30.")
+            fail(source, "Couldn't read '$rest'. Try 1:23:45, 5:30, 90, +30, or -1:30.")
             return 0
         }
         ScreenManager.seek(screen, target)
-        ok(source, "'${screen.playback.label}' seeked to ${Times.format(screen.playback.currentPositionMs())}")
+        ok(source, "Moved ${screen.playback.label} to ${Times.format(screen.playback.currentPositionMs())}.")
         return 1
     }
 
@@ -367,11 +394,11 @@ object PaperCommands {
         val (screen, rest) = targetAndRest(source, args) ?: return 0
         val volume = rest.toIntOrNull()?.takeIf { it in 0..100 }
         if (volume == null) {
-            fail(source, "Usage: /pm volume [screen] <0-100>")
+            fail(source, "Volume must be from 0 to 100: /pm volume [screen] <0-100>")
             return 0
         }
         ScreenManager.setVolume(screen, volume / 100f)
-        ok(source, "Volume on '${screen.definition.name}' set to $volume%")
+        ok(source, "Set ${screen.definition.name} theater volume to $volume%.")
         return 1
     }
 
@@ -380,15 +407,15 @@ object PaperCommands {
         return when (screen.playback.state) {
             PlayState.LOADED, PlayState.PAUSED -> {
                 ScreenManager.start(screen)
-                ok(source, "Rolling '${screen.playback.label}' on '${screen.definition.name}'")
+                ok(source, "Rolling ${screen.playback.label} on ${screen.definition.name}.")
                 1
             }
             PlayState.PLAYING -> {
-                fail(source, "'${screen.definition.name}' is already playing")
+                fail(source, "${screen.definition.name} is already playing.")
                 0
             }
             PlayState.STOPPED -> {
-                fail(source, "Nothing loaded. Use /pm load <movie> first, or /pm play <movie>.")
+                fail(source, "Nothing is loaded. Use /pm load <movie> or /pm play <movie>.")
                 0
             }
         }
@@ -408,7 +435,7 @@ object PaperCommands {
                 MediaResolver.resolve(input)
             } catch (e: Exception) {
                 Bukkit.getScheduler().runTask(plugin, Runnable {
-                    fail(source, e.message ?: "Could not resolve that")
+                    fail(source, e.message ?: "Could not resolve that movie.")
                 })
                 return@startVirtualThread
             }
@@ -418,27 +445,30 @@ object PaperCommands {
 
     // --- admin ---
 
-    private fun upload(context: CommandContext<CommandSourceStack>): Int {
+    private fun dashboard(context: CommandContext<CommandSourceStack>): Int {
         val source = context.source
         if (!PremiereConfig.uploadConfigured) {
-            fail(source, "Uploads aren't configured. Fill in the r2_* settings in plugins/Premiere/premiere.json (see README).")
+            fail(source, "The dashboard needs the R2 settings in plugins/Premiere/premiere.json.")
             return 0
         }
         val token = UploadServer.mintToken()
         if (token == null) {
-            fail(source, "Could not start the dashboard; check the server log.")
+            fail(source, "Couldn't start the dashboard. Check the server log for the port error.")
             return 0
         }
-        val base = PremiereConfig.uploadPublicAddress.ifBlank {
-            "http://<this-server's-address>:${PremiereConfig.uploadHttpPort}"
-        }
+        val base = UploadServer.dashboardBaseAddress()
         val url = "$base/dash?token=$token"
-        val link = Component.text(url)
+        val link = Component.text("[ OPEN DASHBOARD ]", NamedTextColor.AQUA)
+            .decorate(TextDecoration.BOLD)
             .decorate(TextDecoration.UNDERLINED)
             .clickEvent(ClickEvent.openUrl(url))
-        source.sender.sendMessage(Component.text("Dashboard link (valid 1 hour): ").append(link))
-        if (PremiereConfig.uploadPublicAddress.isBlank()) {
-            ok(source, "Tip: set upload_public_address in plugins/Premiere/premiere.json to make this link clickable.")
+        source.sender.sendMessage(info("Staff dashboard  ").append(link))
+        note(source, "Private session link • expires in 1 hour.")
+        if (!UploadServer.hasPublicAddress) {
+            note(
+                source,
+                "This automatic link works on the server's local network. For remote staff, set upload_public_address to an HTTPS proxy or tunnel URL.",
+            )
         }
         return 1
     }
@@ -446,7 +476,7 @@ object PaperCommands {
     private fun movies(context: CommandContext<CommandSourceStack>): Int {
         val source = context.source
         if (!PremiereConfig.uploadConfigured) {
-            fail(source, "No movie library configured (r2_* settings in plugins/Premiere/premiere.json).")
+            fail(source, "No movie library is configured. Add the R2 settings in plugins/Premiere/premiere.json.")
             return 0
         }
         Thread.startVirtualThread {
@@ -454,15 +484,22 @@ object PaperCommands {
                 MovieLibrary.displayNamesWithCc(R2Storage.listKeys())
             } catch (e: Exception) {
                 Bukkit.getScheduler().runTask(plugin, Runnable {
-                    fail(source, "Could not reach the movie library: ${e.message}")
+                    fail(source, "Couldn't reach the movie library: ${e.message}")
                 })
                 return@startVirtualThread
             }
             Bukkit.getScheduler().runTask(plugin, Runnable {
                 if (names.isEmpty()) {
-                    ok(source, "The library is empty. Add movies with /pm upload.")
+                    note(source, "The movie library is empty. Add a movie through /pm dashboard.")
                 } else {
-                    ok(source, "Movies: ${names.joinToString(", ")}")
+                    source.sender.sendMessage(info("Movie library — ${names.size} titles"))
+                    names.forEach { displayName ->
+                        val movie = displayName.removeSuffix(" (cc)")
+                        source.sender.sendMessage(
+                            Component.text("  • ", NamedTextColor.DARK_GRAY)
+                                .append(command(displayName, "/pm play $movie"))
+                        )
+                    }
                 }
             })
         }
@@ -470,11 +507,19 @@ object PaperCommands {
     }
 
     private fun reload(context: CommandContext<CommandSourceStack>): Int {
-        PremiereConfig.reload()
+        if (!PremiereConfig.reload()) {
+            fail(context.source, "Config reload failed. Fix the server-log error; the current settings are still active.")
+            return 0
+        }
         // The dashboard restarts lazily so a port change takes effect; open
         // sessions lose their tokens, which is fine.
         UploadServer.stop()
-        ok(context.source, "Premiere config reloaded. Audio settings apply from the next play; run /pm upload for a fresh dashboard.")
+        ok(context.source, "Config reloaded. New audio settings apply to the next movie.")
+        context.source.sender.sendMessage(
+            info("Dashboard sessions were refreshed. ")
+                .append(command("Run /pm dashboard", "/pm dashboard"))
+                .append(Component.text(" for a new link.", NamedTextColor.DARK_GRAY))
+        )
         return 1
     }
 
@@ -482,19 +527,29 @@ object PaperCommands {
         val source = context.source
         val screens = ScreenManager.all()
         if (screens.isEmpty()) {
-            ok(source, "No screens defined")
+            note(source, "No screens are defined. Use /pm wand to create one.")
             return 0
         }
+        source.sender.sendMessage(info("Screens — ${screens.size} defined"))
         for (screen in screens) {
             val d = screen.definition
             val p = screen.playback
-            val status = when (p.state) {
-                PlayState.STOPPED -> "idle"
-                PlayState.LOADED -> "loaded and ready: ${p.label}"
-                PlayState.PAUSED -> "paused at ${p.currentPositionMs() / 1000}s: ${p.label}"
-                PlayState.PLAYING -> "playing at ${p.currentPositionMs() / 1000}s: ${p.label}"
+            val (status, color) = when (p.state) {
+                PlayState.STOPPED -> "IDLE" to NamedTextColor.DARK_GRAY
+                PlayState.LOADED -> "READY" to NamedTextColor.AQUA
+                PlayState.PAUSED -> "PAUSED" to NamedTextColor.YELLOW
+                PlayState.PLAYING -> "PLAYING" to NamedTextColor.GREEN
             }
-            ok(source, "${d.name}: ${d.width}x${d.height} at (${d.origin.x}, ${d.origin.y}, ${d.origin.z}) facing ${d.facing.serializedName}, $status")
+            var line = Component.text("  ● ", color)
+                .append(Component.text(d.name, NamedTextColor.WHITE).decorate(TextDecoration.BOLD))
+                .append(Component.text("  $status", color))
+                .append(Component.text("  ${d.width}×${d.height} ${d.facing.serializedName}", NamedTextColor.GRAY))
+            if (p.state != PlayState.STOPPED) {
+                line = line.append(
+                    Component.text("  ${Times.format(p.currentPositionMs())} • ${p.label}", NamedTextColor.DARK_GRAY)
+                )
+            }
+            source.sender.sendMessage(line)
         }
         return screens.size
     }

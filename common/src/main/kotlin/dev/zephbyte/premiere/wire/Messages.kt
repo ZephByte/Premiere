@@ -20,6 +20,8 @@ data class ScreenStateMessage(
     val audioLanguage: String,
     val audioDistance: Float,
     val state: PlayState,
+    /** Changes whenever the media timeline must be rebuilt (fresh play/load/seek). */
+    val generation: Int,
     val mediaPositionMs: Long,
     val volume: Float,
     val removed: Boolean,
@@ -32,5 +34,14 @@ data class ScreenStateMessage(
  */
 object RequestScreensMessage
 
-/** Sent by a video client when a LOADED screen has its first frame decoded. */
-data class ScreenReadyMessage(val screen: String)
+/**
+ * Sent by a video client when a LOADED screen has its first frame decoded.
+ * The generation prevents a late ready packet for an older load from marking
+ * newly selected media as ready.
+ */
+data class ScreenReadyMessage(
+    val screen: String,
+    val generation: Int,
+    /** Decoder-reported media duration; also powers dashboard seeking. */
+    val durationMs: Long,
+)

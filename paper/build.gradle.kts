@@ -55,6 +55,9 @@ tasks.shadowJar {
     // No relocation: Paper isolates plugin classloaders, and relocating
     // kotlin-stdlib breaks Kotlin metadata. Shading (over plugin.yml
     // `libraries:`) keeps startup deterministic and offline-safe.
+    from(rootProject.file("LICENSE.txt")) {
+        rename { "LICENSE.txt_Premiere" }
+    }
 }
 
 tasks.build {
@@ -102,6 +105,11 @@ val installPlugin = tasks.register<Copy>("installPlugin") {
     dependsOn(tasks.shadowJar)
     from(tasks.shadowJar.flatMap { it.archiveFile })
     into(runDir.dir("plugins"))
+    doFirst {
+        runDir.dir("plugins").asFile.listFiles()
+            ?.filter { it.name.startsWith("Premiere-Paper-") && it.extension == "jar" }
+            ?.forEach { it.delete() }
+    }
 }
 
 tasks.register<Exec>("runPaper") {

@@ -78,9 +78,48 @@ object R2Storage {
     /** S3 has no rename; this is the copy half (server-side, no data transfer). */
     fun copyObject(sourceKey: String, destinationKey: String) {
         val copySource = "/${PremiereConfig.r2Bucket}/${encodeKey(sourceKey)}"
-        val response = sendSigned("PUT", destinationKey, "", mapOf("x-amz-copy-source" to copySource))
+        val response = sendSigned(
+            "PUT",
+            destinationKey,
+            "",
+            mapOf(
+                "x-amz-copy-source" to copySource,
+                // R2-specific destination condition: never overwrite an object
+                // that appeared between the dashboard's list and copy calls.
+                "cf-copy-destination-if-none-match" to "*",
+            ),
+        )
         if (response.statusCode() !in 200..299 || response.body().contains("<Error>")) {
             throw IllegalStateException("R2 copy failed: HTTP ${response.statusCode()}: ${response.body().take(200)}")
+        }
+    }
+
+    /**
+     * Copies, verifies, and only then deletes the source. R2's S3 API is
+     * strongly consistent, so a successful copy must immediately appear in
+     * the following listing with the same byte count.
+     */
+    fun renameObject(sourceKey: String, destinationKey: String, expectedSize: Long) {
+        copyObject(sourceKey, destinationKey)
+        val copied = try {
+            listObjects().firstOrNull { it.key == destinationKey }
+        } catch (e: Exception) {
+            runCatching { deleteObject(destinationKey) }
+            throw IllegalStateException("Could not verify the R2 copy; the original was kept: ${e.message}", e)
+        }
+        if (copied == null || copied.size != expectedSize) {
+            runCatching { deleteObject(destinationKey) }
+            val detail = if (copied == null) "the copied object was not found" else
+                "expected $expectedSize bytes but copied ${copied.size}"
+            throw IllegalStateException("R2 copy verification failed: $detail; the original was kept")
+        }
+        try {
+            deleteObject(sourceKey)
+        } catch (e: Exception) {
+            throw IllegalStateException(
+                "R2 copied the movie to '$destinationKey', but could not remove '$sourceKey': ${e.message}",
+                e,
+            )
         }
     }
 

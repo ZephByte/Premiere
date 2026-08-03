@@ -19,6 +19,8 @@ import org.lwjgl.glfw.GLFW
  */
 class PremiereClient : ClientModInitializer {
 
+    private var initialScreenRequestPending = false
+
     override fun onInitializeClient() {
         PremiereClientConfig.load()
         ClientPlayNetworking.registerGlobalReceiver(ScreenStatePayload.TYPE) { payload, _ ->
@@ -28,11 +30,14 @@ class PremiereClient : ClientModInitializer {
         // mod install) sync to the current film position instead of waiting for
         // the next push.
         ClientPlayConnectionEvents.JOIN.register { _, _, _ ->
-            if (ClientPlayNetworking.canSend(RequestScreensPayload.TYPE)) {
-                ClientPlayNetworking.send(RequestScreensPayload.INSTANCE)
-            }
+            // Paper can advertise its plugin channels a few ticks after this
+            // callback. Keep the request pending instead of silently giving
+            // up and waiting for the ten-second playback heartbeat.
+            initialScreenRequestPending = true
+            requestInitialScreensIfAvailable()
         }
         ClientPlayConnectionEvents.DISCONNECT.register { _, _ ->
+            initialScreenRequestPending = false
             ClientScreens.clear()
         }
         ScreenRenderer.register()
@@ -50,6 +55,8 @@ class PremiereClient : ClientModInitializer {
             KeyMapping("key.premiere.settings", GLFW.GLFW_KEY_COMMA, category)
         )
         ClientTickEvents.END_CLIENT_TICK.register { client ->
+            requestInitialScreensIfAvailable()
+            ClientScreens.tick()
             while (subtitleKey.consumeClick()) {
                 val enabled = PremiereClientConfig.toggleSubtitles()
                 client.player?.sendOverlayMessage(
@@ -62,5 +69,11 @@ class PremiereClient : ClientModInitializer {
                 client.gui.setScreen(PremiereSettingsScreen(client.gui.screen()))
             }
         }
+    }
+
+    private fun requestInitialScreensIfAvailable() {
+        if (!initialScreenRequestPending || !ClientPlayNetworking.canSend(RequestScreensPayload.TYPE)) return
+        ClientPlayNetworking.send(RequestScreensPayload.INSTANCE)
+        initialScreenRequestPending = false
     }
 }

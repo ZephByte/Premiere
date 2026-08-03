@@ -13,16 +13,18 @@ import org.lwjgl.system.MemoryUtil
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.min
 
 /**
  * Decodes one URL on a background thread and hands finished RGBA frames to the
  * render thread, which owns the GPU texture.
  *
- * Sync model: the last server payload anchors a media position to the local
- * clock; the decoder chases that target. Small drift (under [DROP_BEHIND_MS])
- * is tolerated, being slightly ahead just waits, and anything past
- * [HARD_SEEK_MS] hard-seeks the demuxer instead of creeping.
+ * Sync model: each server observation anchors a media position to the local
+ * clock and the decoder chases that target. Small drift (under
+ * [DROP_BEHIND_MS]) is tolerated and being slightly ahead just waits. Normal
+ * decoder lag is repaid by omitting stale frame uploads; explicit generation
+ * changes and genuinely large drift reposition the demuxer.
  */
 class VideoPlayer(
     screenName: String,
@@ -30,14 +32,17 @@ class VideoPlayer(
     audioPosition: net.minecraft.world.phys.Vec3,
     audioDistance: Float,
     private val audioLanguage: String,
-    private val onFirstFrame: (() -> Unit)? = null,
+    private val onFirstFrame: ((durationMs: Long) -> Unit)? = null,
 ) : AutoCloseable {
 
     companion object {
         private const val DROP_BEHIND_MS = 100L
         private const val HARD_SEEK_MS = 2500L
+        private const val POST_SEEK_GRACE_MS = 5_000L
         private val NEXT_ID = AtomicInteger()
     }
+
+    private val debugName = screenName
 
     // Unique per instance so a replaced player never fights the old one for a
     // texture id.
@@ -57,12 +62,33 @@ class VideoPlayer(
     @Volatile
     private var running = true
 
+    @Volatile
+    private var forceSeekRequested = false
+
+    /**
+     * A renderable frame belongs to a timeline epoch. A seek increments the
+     * requested epoch immediately, so an old frame already in flight cannot
+     * dismiss the loading indicator or flash after the seek.
+     */
+    private val requestedFrameEpoch = AtomicInteger()
+
+    @Volatile
+    private var publishedFrameEpoch = -1
+
+    /** True until this timeline has produced a fresh video frame. */
+    val isLoading: Boolean
+        get() = publishedFrameEpoch != requestedFrameEpoch.get()
+
     // Frame handoff (decode thread -> render thread)
     private val frameLock = Any()
     private var frameBytes: ByteArray? = null
     private var frameWidth = 0
     private var frameHeight = 0
+    private var pendingFrameTimestampMs = -1L
     private var hasNewFrame = false
+
+    @Volatile
+    private var displayedFrameTimestampMs = -1L
 
     // Render-thread only
     private var texture: DynamicTexture? = null
@@ -83,18 +109,54 @@ class VideoPlayer(
     val isAlive: Boolean
         get() = running && thread.isAlive
 
-    fun updateSync(mediaPositionMs: Long, playing: Boolean) {
+    fun updateSync(mediaPositionMs: Long, playing: Boolean, forceSeek: Boolean = false) {
+        val previousPlaying = this.playing
+        // Every server observation refreshes the local master-clock anchor.
+        // This is only a clock correction; the demuxer is repositioned below
+        // only for an explicit generation seek or genuinely large drift.
         anchorMediaMs = mediaPositionMs
         anchorLocalMs = System.currentTimeMillis()
         this.playing = playing
+        Premiere.LOGGER.info(
+            "Premiere video diag [{}] sync position={}ms playing={} stateChanged={} forceSeek={} frameEpoch={}",
+            debugName,
+            mediaPositionMs,
+            playing,
+            previousPlaying != playing,
+            forceSeek,
+            requestedFrameEpoch.get(),
+        )
+        if (forceSeek) {
+            requestedFrameEpoch.incrementAndGet()
+            forceSeekRequested = true
+            audio.flush()
+        }
         audio.setPaused(!playing)
     }
 
-    private fun targetMediaMs(): Long =
+    /** Untrimmed authoritative server timeline. */
+    private fun rawMediaMs(): Long =
         if (playing) anchorMediaMs + (System.currentTimeMillis() - anchorLocalMs) else anchorMediaMs
 
-    /** Master-clock media position; also drives the subtitle overlay. */
-    fun currentMediaMs(): Long = targetMediaMs().coerceAtLeast(0)
+    /**
+     * Apply A/V trim by delaying whichever track is early. In particular, a
+     * negative trim delays PCM instead of asking the shared demuxer to decode
+     * picture into the future; that used to fill the audio FIFO and stall both
+     * tracks. Neither timeline is allowed to run ahead of the server clock.
+     */
+    private fun videoMediaMs(rawMs: Long = rawMediaMs(), trimMs: Int = currentTrimMs()): Long =
+        (rawMs - max(trimMs, 0)).coerceAtLeast(0)
+
+    private fun audioMediaMs(rawMs: Long = rawMediaMs(), trimMs: Int = currentTrimMs()): Long =
+        // Preserve a negative value near the start of a film: timestamp zero
+        // must not become due until the requested audio delay has elapsed.
+        rawMs + min(trimMs, 0)
+
+    private fun currentTrimMs(): Int =
+        dev.zephbyte.premiere.client.PremiereClientConfig.avSyncMs
+
+    /** Presentation position used by the subtitle overlay. */
+    fun currentMediaMs(): Long = videoMediaMs()
 
     private val subtitles = EmbeddedSubtitleTracks()
 
@@ -102,8 +164,11 @@ class VideoPlayer(
     private val audio = dev.zephbyte.premiere.client.audio.MovieAudio(
         audioPosition.x.toFloat(), audioPosition.y.toFloat(), audioPosition.z.toFloat(),
         audioDistance,
-        clock = { targetMediaMs() },
-        trimMs = { dev.zephbyte.premiere.client.PremiereClientConfig.avSyncMs },
+        debugName = debugName,
+        serverClock = { rawMediaMs() },
+        clock = { audioMediaMs() },
+        videoClock = { videoMediaMs() },
+        localVolume = { dev.zephbyte.premiere.client.PremiereClientConfig.movieVolume },
     )
 
     fun setVolume(value: Float) = audio.setVolume(value)
@@ -130,37 +195,141 @@ class VideoPlayer(
                 .reopenForLanguage(grabber, url, audioLanguage, configure)
             subtitles.discover(grabber)
             val wantSubtitles = subtitles.any()
+            val hasAudio = grabber.audioChannels > 0 && grabber.audioStream >= 0
             val durationMs = grabber.lengthInTime / 1000
+            this.durationMs = durationMs
+            Premiere.LOGGER.info(
+                "Premiere video diag [{}] decoder started duration={}ms video={}x{} audioChannels={} sampleRate={} audioStream={} format={}",
+                debugName,
+                durationMs,
+                grabber.imageWidth,
+                grabber.imageHeight,
+                grabber.audioChannels,
+                grabber.sampleRate,
+                grabber.audioStream,
+                grabber.format ?: "unknown",
+            )
             var lastTsMs = 0L
+            var lastAudioTsMs = -1L
+            var decodeEpoch = requestedFrameEpoch.get()
+            var diagnosticAtMs = 0L
+            var eofLogAtMs = 0L
+            var audioChunks = 0L
+            var audioShorts = 0L
+            var videoFrames = 0L
+            var droppedVideoFrames = 0L
+            var appliedTrimMs = currentTrimMs()
+            var lastSeekAtMs = 0L
             while (running) {
-                if (!playing && hasFrame()) {
-                    // Paused with a frame on screen: idle cheaply, but keep
-                    // checking in case of resume or a pause-position change.
-                    if (abs(lastTsMs - targetMediaMs()) < DROP_BEHIND_MS) {
-                        Thread.sleep(50)
-                        continue
-                    }
+                if (!playing && !forceSeekRequested && !isLoading) {
+                    // A paused player normally holds its last frame. A newly
+                    // loaded or late-joined player is the exception: keep
+                    // decoding at the stationary target until one picture is
+                    // published. That first picture completes /pm load and
+                    // gives an already-paused screen something to display.
+                    Thread.sleep(50)
+                    continue
                 }
-                val target = targetMediaMs().coerceAtLeast(0)
+                val diagnosticNow = System.currentTimeMillis()
+                val rawClock = rawMediaMs().coerceAtLeast(0)
+                val requestedTrimMs = currentTrimMs()
+                val trimChanged = requestedTrimMs != appliedTrimMs
+                val target = videoMediaMs(rawClock, requestedTrimMs)
+                val audioTarget = audioMediaMs(rawClock, requestedTrimMs)
+                if (diagnosticNow - diagnosticAtMs >= 2_000) {
+                    diagnosticAtMs = diagnosticNow
+                    Premiere.LOGGER.info(
+                        "Premiere video diag [{}] playing={} loading={} rawClock={}ms avSync={}ms videoClock={}ms audioClock={}ms decodedVideoTs={}ms decodedVideoDelta={}ms displayedVideoTs={}ms displayedVideoDelta={}ms decodedAudioTs={}ms decodedAudioLead={}ms +audioChunks={} +audioShorts={} +videoFrames={} +videoDrops={}",
+                        debugName,
+                        playing,
+                        isLoading,
+                        rawClock,
+                        requestedTrimMs,
+                        target,
+                        audioTarget,
+                        lastTsMs,
+                        lastTsMs - target,
+                        displayedFrameTimestampMs,
+                        if (displayedFrameTimestampMs < 0) -1 else displayedFrameTimestampMs - target,
+                        lastAudioTsMs,
+                        if (lastAudioTsMs < 0) -1 else lastAudioTsMs - audioTarget,
+                        audioChunks,
+                        audioShorts,
+                        videoFrames,
+                        droppedVideoFrames,
+                    )
+                    audioChunks = 0
+                    audioShorts = 0
+                    videoFrames = 0
+                    droppedVideoFrames = 0
+                }
                 if (durationMs > 0 && target > durationMs + 1000) {
                     // Film over: hold the last frame, but stay alive — a replay
                     // of the same URL resets the target to ~0 and we seek back.
                     Thread.sleep(200)
                     continue
                 }
-                if (abs(lastTsMs - target) > HARD_SEEK_MS) {
+                val serverSeek = forceSeekRequested
+                val explicitSeek = serverSeek || trimChanged
+                val driftMs = lastTsMs - target
+                val driftSeekAllowed = diagnosticNow - lastSeekAtMs >= POST_SEEK_GRACE_MS
+                if (explicitSeek || (abs(driftMs) > HARD_SEEK_MS && driftSeekAllowed)) {
+                    forceSeekRequested = false
+                    // One demuxer serves both tracks. Start at the earlier
+                    // adjusted timeline so delayed audio or picture packets
+                    // remain available instead of being skipped.
+                    val demuxTarget = min(audioTarget, target).coerceAtLeast(0)
+                    Premiere.LOGGER.info(
+                        "Premiere video diag [{}] demux seek reason={} presentationTarget={}ms audioTarget={}ms demuxTarget={}ms previousVideoTs={}ms drift={}ms epoch={}",
+                        debugName,
+                        when {
+                            trimChanged -> "av-sync"
+                            explicitSeek -> "generation"
+                            else -> "large-drift"
+                        },
+                        target,
+                        audioTarget,
+                        demuxTarget,
+                        lastTsMs,
+                        driftMs,
+                        requestedFrameEpoch.get(),
+                    )
+                    // Explicit server seeks already advance the epoch in
+                    // updateSync(). Large local drift advances it here so an
+                    // old in-flight frame cannot flash after repositioning.
+                    if (!serverSeek) {
+                        requestedFrameEpoch.incrementAndGet()
+                    }
+                    decodeEpoch = requestedFrameEpoch.get()
                     audio.flush()
-                    grabber.setTimestamp(target * 1000, true)
+                    grabber.setTimestamp(demuxTarget * 1000, true)
+                    lastTsMs = demuxTarget
+                    appliedTrimMs = requestedTrimMs
+                    lastSeekAtMs = diagnosticNow
                 }
-                // When behind, skim with pixel conversion off: decoding alone
-                // is several times faster than decode + 1080p RGBA convert,
-                // and a near-realtime machine would otherwise never repay a
-                // post-seek deficit — the picture would lag the master clock
-                // (and the correctly-clocked audio) forever.
-                // doData=true also surfaces subtitle packets either way.
-                val skimming = target - lastTsMs > DROP_BEHIND_MS
-                val frame = grabber.grabFrame(true, true, !skimming, false, wantSubtitles)
+                // JavaCV's processing flag covers samples as well as images.
+                // The old skim disabled it and silently discarded PCM. When
+                // the whole demuxer is behind, request processed audio only;
+                // JavaCV skips expensive video conversion until the audio
+                // cursor reaches the picture target, then normal A/V grabbing
+                // resumes at the next frame. If audio is already current, a
+                // slightly old video timestamp alone must not trigger a skim.
+                val demuxCursorMs = max(lastTsMs, lastAudioTsMs)
+                val audioOnlyCatchUp = hasAudio && target - demuxCursorMs > DROP_BEHIND_MS
+                val frame = grabber.grabFrame(true, !audioOnlyCatchUp, true, false, wantSubtitles)
                 if (frame == null) {
+                    val now = System.currentTimeMillis()
+                    if (now - eofLogAtMs >= 5_000) {
+                        eofLogAtMs = now
+                        Premiere.LOGGER.warn(
+                            "Premiere video diag [{}] grabFrame returned null target={}ms videoTs={}ms audioTs={}ms duration={}ms",
+                            debugName,
+                            target,
+                            lastTsMs,
+                            lastAudioTsMs,
+                            durationMs,
+                        )
+                    }
                     // EOF (or a demuxer hiccup): wait for a restart/seek
                     // instead of dying with the last frame frozen on screen.
                     Thread.sleep(200)
@@ -170,9 +339,10 @@ class VideoPlayer(
                     val samples = frame.samples?.getOrNull(0) as? java.nio.ShortBuffer
                     if (samples != null) {
                         val pcm = ShortArray(samples.remaining()).also { samples.duplicate().get(it) }
-                        // Stale chunks are dropped inside; live ones block
-                        // briefly when full, pacing decode at realtime.
-                        audio.enqueue(frame.timestamp / 1000, pcm)
+                        lastAudioTsMs = frame.timestamp / 1000
+                        audioChunks++
+                        audioShorts += pcm.size
+                        audio.enqueue(lastAudioTsMs, pcm)
                     }
                     continue
                 }
@@ -181,12 +351,19 @@ class VideoPlayer(
                     continue
                 }
                 lastTsMs = frame.timestamp / 1000
-                if (skimming || frame.image == null) continue // unconverted; not drawable
-                if (lastTsMs < target - DROP_BEHIND_MS) continue // behind: drop
+                if (frame.image == null) {
+                    droppedVideoFrames++
+                    continue
+                }
+                if (lastTsMs < target - DROP_BEHIND_MS) {
+                    droppedVideoFrames++
+                    continue // behind: drop
+                }
                 if (lastTsMs > target) {
                     Thread.sleep(min(lastTsMs - target, 200))
                 }
-                publish(frame)
+                videoFrames++
+                publish(frame, decodeEpoch)
             }
         } catch (e: InterruptedException) {
             // closing
@@ -194,17 +371,20 @@ class VideoPlayer(
             Premiere.LOGGER.error("Video decode failed for {}", url, e)
         } finally {
             runCatching { grabber?.stop(); grabber?.release() }
+            Premiere.LOGGER.info("Premiere video diag [{}] decoder stopped running={}", debugName, running)
         }
     }
 
-    private fun hasFrame(): Boolean = synchronized(frameLock) { frameBytes != null }
-
     private var firstFrameReported = false
 
-    private fun publish(frame: org.bytedeco.javacv.Frame) {
+    @Volatile
+    private var durationMs = 0L
+
+    private fun publish(frame: org.bytedeco.javacv.Frame, epoch: Int) {
+        if (epoch != requestedFrameEpoch.get()) return
         if (!firstFrameReported) {
             firstFrameReported = true
-            onFirstFrame?.invoke()
+            onFirstFrame?.invoke(durationMs)
         }
         val src = frame.image[0] as ByteBuffer
         val width = frame.imageWidth
@@ -229,7 +409,9 @@ class VideoPlayer(
                     view.get(out, row * rowBytes, rowBytes)
                 }
             }
+            pendingFrameTimestampMs = frame.timestamp / 1000
             hasNewFrame = true
+            publishedFrameEpoch = epoch
         }
     }
 
@@ -249,10 +431,9 @@ class VideoPlayer(
                     Minecraft.getInstance().textureManager.register(textureId, texture!!)
                 }
                 val pixels = texture!!.pixels
-                if (pixels != null) {
-                    MemoryUtil.memByteBuffer(pixels.pointer, bytes.size).put(bytes)
-                    texture!!.upload()
-                }
+                MemoryUtil.memByteBuffer(pixels.pointer, bytes.size).put(bytes)
+                texture!!.upload()
+                displayedFrameTimestampMs = pendingFrameTimestampMs
                 hasNewFrame = false
             }
             return if (texture != null) textureId else null

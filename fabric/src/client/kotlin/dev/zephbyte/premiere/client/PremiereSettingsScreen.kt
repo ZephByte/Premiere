@@ -34,7 +34,9 @@ class PremiereSettingsScreen(private val parent: Screen?) : Screen(Component.lit
         avSyncSlider = addRenderableWidget(
             SettingsSlider(
                 centerX - 100, y, 144, "A/V Sync",
-                -2000.0, 2000.0, PremiereClientConfig.avSyncMs.toDouble(),
+                -PremiereClientConfig.MAX_AV_SYNC_MS.toDouble(),
+                PremiereClientConfig.MAX_AV_SYNC_MS.toDouble(),
+                PremiereClientConfig.avSyncMs.toDouble(),
                 { "%+d".format(snap(it)) },
             ) {
                 PremiereClientConfig.updateAvSyncMs(snap(it))
@@ -45,11 +47,23 @@ class PremiereSettingsScreen(private val parent: Screen?) : Screen(Component.lit
         box.setValue(PremiereClientConfig.avSyncMs.toString())
         box.setResponder { text ->
             text.toIntOrNull()?.let { typed ->
-                if (typed in -2000..2000) PremiereClientConfig.updateAvSyncMs(typed)
+                if (typed in -PremiereClientConfig.MAX_AV_SYNC_MS..PremiereClientConfig.MAX_AV_SYNC_MS) {
+                    PremiereClientConfig.updateAvSyncMs(typed)
+                    avSyncSlider?.setMappedValue(PremiereClientConfig.avSyncMs.toDouble())
+                }
             }
         }
         addRenderableWidget(box)
         avSyncBox = box
+        y += 26
+
+        addRenderableWidget(
+            SettingsSlider(
+                centerX - 100, y, 200, "Movie Volume",
+                0.0, 1.0, PremiereClientConfig.movieVolume.toDouble(),
+                { "%d%%".format((it * 100).toInt()) },
+            ) { PremiereClientConfig.updateMovieVolume(it.toFloat()) }
+        )
         y += 26
 
         addRenderableWidget(
@@ -78,14 +92,17 @@ class PremiereSettingsScreen(private val parent: Screen?) : Screen(Component.lit
         )
     }
 
-    private fun snap(value: Double): Int = (value / 25).toInt() * 25
+    private fun snap(value: Double): Int = ((value / 25).toInt() * 25).coerceIn(
+        -PremiereClientConfig.MAX_AV_SYNC_MS,
+        PremiereClientConfig.MAX_AV_SYNC_MS,
+    )
 
     override fun extractRenderState(graphics: GuiGraphicsExtractor, mouseX: Int, mouseY: Int, delta: Float) {
         super.extractRenderState(graphics, mouseX, mouseY, delta)
         graphics.text(font, title.string, (width - font.width(title.string)) / 2, height / 2 - 110, 0xFFFFFFFF.toInt(), true)
         graphics.text(
             font,
-            "A/V Sync: voices after lips -> increase. Adjust during a film.",
+            "Voices after lips: increase. Voices before lips: decrease.",
             width / 2 - 100,
             height / 2 - 30,
             0xFFA0A0A0.toInt(),

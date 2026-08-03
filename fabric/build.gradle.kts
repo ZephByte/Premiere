@@ -8,7 +8,7 @@ plugins {
     id("me.modmuss50.mod-publish-plugin")
 }
 
-// e.g. 1.0.0-SNAPSHOT+26.2 — one jar per stonecutter MC version.
+// e.g. 1.0.0-beta.1+26.2 — one jar per stonecutter MC version.
 version = "${property("mod_version")}+${stonecutter.current.version}"
 
 base {

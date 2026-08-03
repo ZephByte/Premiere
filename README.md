@@ -47,8 +47,10 @@ The full checklist, in order. Steps 1–2 get you a working theater; steps
 3. Set up the movie library: a one-time ~15-minute Cloudflare R2 setup, then
    fill in the `r2_*` and `upload_*` fields of `config/premiere.json`.
    Full walkthrough in [Hosting the movie file](#hosting-the-movie-file).
-4. Open one TCP port (default **8477**) for the upload page — a
-   control-panel question on rented hosts. Only staff ever connect to it.
+4. Make the dashboard reachable. On a trusted LAN, Premiere automatically
+   links to the server's LAN address on port **8477**; allow that port through
+   the host firewall. For staff on other networks, put an HTTPS reverse proxy
+   or tunnel in front of 8477 and set `upload_public_address` to its public URL.
 
 Without steps 3–4 the mod still works — staff just paste direct URLs into
 `/pm play` instead of using names and uploads.
@@ -65,8 +67,9 @@ directly.
 
 After the one-time setup below, nobody touches a dashboard or a URL again:
 
-1. `/pm upload` in-game → the mod replies with a **one-time link**
-   (valid 30 minutes, single use, gated by the same permission as `play`).
+1. `/pm dashboard` (or `/pm dash`) in-game → the mod replies with a colored,
+   clickable private dashboard link (valid for one hour and gated by the same
+   permission as `play`).
 2. Open it, **name the movie** (e.g. `intro_joke`), drop the `.mp4`.
 3. Showtime: `/pm play theater intro_joke` — names tab-complete, and
    `/pm movies` lists the library.
@@ -111,6 +114,29 @@ leaked link can't run up a bandwidth bill.) The API token lives only in
 bucket**: that's the blast radius if the host ever leaks it — movie files,
 nothing else. Rotate it in the Cloudflare dashboard if in doubt.
 
+The dashboard link is a one-hour bearer credential with screen and library
+controls, so treat it like a temporary password. Use an HTTPS reverse proxy
+when exposing the dashboard beyond a trusted LAN; direct HTTP is intended for
+local testing only. Do not paste the link into public chat or staff logs.
+
+The dashboard listener binds to all server network interfaces; it is not
+localhost-only. If `upload_public_address` is blank, `/pm dashboard`
+automatically chooses the host's LAN IPv4 address and produces a link usable by
+devices on that LAN. That does not make the server reachable through a router:
+remote staff still need a public reverse proxy/tunnel (recommended) or port
+forwarding, plus matching firewall and DNS settings. `upload_public_address`
+only tells Premiere which public base URL to put in chat and trust for dashboard
+requests—it does not create the network route itself.
+
+The Screens tab includes an optional muted live preview slaved to the same
+server clock as the theater. The timeline, play/pause, ±10 second, stop, and
+volume controls always operate the authoritative in-game playback. Live preview
+is off by default because it opens a second full video stream; enable it only
+when you need to inspect the picture. It automatically pauses when the dashboard
+or browser tab is hidden. Browser preview support can be narrower than Premiere's
+FFmpeg support (notably for some MKV codecs); if the preview is unavailable, the
+controls and in-game movie continue to work.
+
 **One-time setup (~15 minutes):**
 
 1. Cloudflare dashboard → **R2** → Create bucket (e.g. `movienight`). Free
@@ -131,16 +157,19 @@ nothing else. Rotate it in the Cloudflare dashboard if in doubt.
    ```json
    {
      "upload_http_port": 8477,
-     "upload_public_address": "http://your.server.address:8477",
+     "upload_public_address": "https://movies.your.server",
      "r2_account_id": "...",
      "r2_bucket": "movienight",
      "r2_access_key_id": "...",
      "r2_secret_access_key": "..."
    }
    ```
-5. Open TCP port 8477 (or your choice) on the host — a control-panel
-   question on rented hosts; confirm it before movie night. Then test end
-   to end with a small file.
+5. Put an HTTPS reverse proxy or tunnel in front of local port 8477 and expose
+   only port 443. Set `upload_public_address` to that public HTTPS origin (with
+   no `/dash` path), run `/pm reload`, then run `/pm dashboard` for a fresh
+   link. For trusted-LAN testing, leave `upload_public_address` blank, allow
+   inbound TCP 8477 on the server host, and Premiere will generate the LAN URL
+   automatically. Then test end to end with a small file.
 
 Delete the big files after movie night (R2 dashboard → bucket → Objects);
 the free tier is measured in GB. Small pre-roll clips can stay.
@@ -185,7 +214,7 @@ All gated behind `movienight.control` (or op level 2) except `list`.
 /pm seek [screen] <time>                     1:23:45, 5:30, 90, +30, -1:30
 /pm stop [screen]                            stop and clear
 /pm volume [screen] <0-100>                  audio volume at the source
-/pm upload                                   dashboard link (control panel, library, uploads)
+/pm dashboard | dash                         dashboard link (control panel, library, uploads)
 /pm movies                                   list the movie library
 /pm reload                                   hot-reload config/premiere.json
 /pm list                                     screens and what's playing
@@ -214,10 +243,14 @@ stream into the mod's own positional OpenAL source, which stays
 sample-locked once aligned. Pause is exact, seeks flush and realign, late
 joiners land at the right timestamp.
 
-The one thing software cannot know is the listener's output-device latency
-(Bluetooth headphones are 100–300ms by themselves). The **A/V Sync** control
-in the client settings (`,` key) trims for it: voices after lips → increase.
-Most wired setups need ~0.
+Premiere automatically timestamp-aligns decoded PCM with the server clock at
+startup, after seeks, and after underruns. The one thing software cannot know
+is the listener's output-device latency (Bluetooth headphones are often
+100–300ms by themselves). The **A/V Sync** control in the client settings
+(`,` key) provides a ±3000ms per-device trim: voices after lips → increase;
+voices before lips → decrease. Most wired setups should need ~0. The same
+settings screen also has a per-player movie volume, independent of the
+staff-controlled source volume.
 
 Server-side audio settings in `config/premiere.json`: `audio_distance`
 (audible radius in blocks, default 48) and `audio_language` (preferred track
@@ -247,15 +280,17 @@ play/load).
 | Picture but no sound | Check the client log for "movie audio unavailable"; also the film may simply have no audio track, or the player is outside `audio_distance` blocks. |
 | Sound noticeably after the picture | That player's output-device latency (Bluetooth!): raise their A/V Sync in the settings screen (`,` key) until lips match. |
 | `Uploads aren't configured` | One of the `r2_*` fields in `config/premiere.json` is blank. |
-| Upload link prints but the page won't load | The upload TCP port isn't open/forwarded on the host, or `upload_public_address` points to the wrong address. |
+| Dashboard link prints but the page won't load | On LAN, allow inbound TCP 8477 in the server host's firewall and verify both devices can reach each other. Remotely, verify the HTTPS proxy/tunnel forwards to 8477 and `upload_public_address` exactly matches its public origin. |
 | Upload page loads but the transfer fails | Usually CORS: add the policy from the setup steps to the bucket. Check the browser console to confirm. |
+| Dashboard controls work but its preview is blank | The browser cannot decode that container/codec, or an HTTPS page is blocking an HTTP movie URL. This does not affect Premiere clients; MP4 with H.264/AAC previews most reliably. |
+| Game playback stutters while dashboard live preview is enabled | The preview is a second full-rate stream competing with the game. Disable live preview; the synchronized timeline and controls continue working. |
 | `Could not reach the movie library` | Typo in `r2_account_id`/`r2_bucket`, or the API token lacks read access to the bucket. Test after fixing — no restart needed. |
 | Playback of a library movie fails for everyone | If the upload worked, suspect the playback link: links expire after 12h (run `play` again for a fresh one), and the API token needs *read* as well as write. |
 | Video out of sync after a lag spike | Self-corrects within ~10s; past 2.5s drift it hard-seeks. Don't replay to fix it. |
 | `No screen named ...` | `/pm list` shows defined screens; names are case-sensitive single words. |
 
-Also worth knowing: `play` always starts from the beginning (pause is the
-only mid-film control), and reaching the end of a movie holds the last frame
+Also worth knowing: playing a newly selected movie starts from the beginning;
+pause and seek control it mid-film. Reaching the end holds the last frame
 until `stop` clears it.
 
 ## Development
@@ -307,14 +342,14 @@ One-time setup:
 Per release:
 
 1. Add a `## Premiere - vX.Y.Z` section at the top of `CHANGELOG.md`.
-2. Set `mod_version=vX.Y.Z` in `gradle.properties` (use `-beta.N`/`-alpha.N`
+2. Set `mod_version=X.Y.Z` in `gradle.properties` (use `-beta.N`/`-alpha.N`
    suffixes for prereleases — they publish as such everywhere).
 3. Commit, then `git tag vX.Y.Z && git push --tags`.
 
 The release workflow verifies the tag matches `mod_version`, builds all
 artifacts, creates a GitHub Release with every jar and the changelog section,
-and publishes: each Fabric version jar (`vX.Y.Z+<mc>`) to Modrinth and
-CurseForge, and the Paper jar (`vX.Y.Z+paper`) to the same Modrinth project.
+and publishes: each Fabric version jar (`X.Y.Z+<mc>`) to Modrinth and
+CurseForge, and the Paper jar (`X.Y.Z+paper`) to the same Modrinth project.
 Local publish check: `./gradlew :fabric:chiseledPublishMods :paper:publishMods`
 (dry-runs without tokens; always use this pair, never bare `publishMods`).
 

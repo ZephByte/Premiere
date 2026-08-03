@@ -16,6 +16,6 @@ subprojects {
 // artifacts of the same release.
 tasks.register("assembleAll") {
     group = "build"
-    description = "Builds every Fabric version jar and the Paper plugin jar in lockstep"
-    dependsOn(":fabric:chiseledBuild", ":paper:shadowJar")
+    description = "Tests and builds every Fabric version jar and the Paper plugin jar in lockstep"
+    dependsOn(":common:check", ":fabric:chiseledBuild", ":paper:check", ":paper:shadowJar")
 }

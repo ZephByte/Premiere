@@ -10,6 +10,7 @@ import dev.zephbyte.premiere.geo.ScreenFacing
 import dev.zephbyte.premiere.geo.ScreenPos
 import dev.zephbyte.premiere.geo.Vec3d
 import dev.zephbyte.premiere.platform.PremierePlatform
+import dev.zephbyte.premiere.util.JsonConfig
 import dev.zephbyte.premiere.wire.ScreenStateMessage
 import java.nio.file.Files
 import java.util.UUID
@@ -96,15 +97,39 @@ object ScreenManager {
         if (screens.containsKey(definition.name)) return false
         val screen = ManagedScreen(definition)
         screens[definition.name] = screen
-        save()
+        if (!save()) {
+            screens.remove(definition.name, screen)
+            return false
+        }
         broadcast(screen)
+        return true
+    }
+
+    /**
+     * Atomically replaces an existing definition in memory. Playback is
+     * intentionally stopped, and clients receive one coherent replacement
+     * snapshot instead of a remove followed by a possibly-failing define.
+     */
+    fun redefine(definition: ScreenDefinition): Boolean {
+        val old = screens[definition.name] ?: return false
+        val replacement = ManagedScreen(definition)
+        screens[definition.name] = replacement
+        if (!save()) {
+            screens[definition.name] = old
+            return false
+        }
+        old.playback.stop()
+        broadcast(replacement)
         return true
     }
 
     fun undefine(name: String): Boolean {
         val screen = screens.remove(name) ?: return false
+        if (!save()) {
+            screens[name] = screen
+            return false
+        }
         screen.playback.stop()
-        save()
         sendToAll(messageFor(screen, removed = true))
         return true
     }
@@ -146,9 +171,13 @@ object ScreenManager {
     }
 
     /** A video client decoded its first frame of a LOADED screen. */
-    fun clientReportedReady(screenName: String, reporterUuid: UUID) {
+    fun clientReportedReady(screenName: String, generation: Int, durationMs: Long, reporterUuid: UUID) {
         val screen = screens[screenName] ?: return
-        if (screen.playback.state != PlayState.LOADED || screen.readyNotified) return
+        if (screen.playback.generation != generation) return
+        if (durationMs > 0) screen.playback.durationMs = durationMs
+        if (screen.playback.state != PlayState.LOADED ||
+            screen.readyNotified
+        ) return
         screen.readyNotified = true
         val reporterName = platform?.player(reporterUuid)?.name ?: "a viewer"
         val loader = screen.loaderUuid?.let { uuid -> platform?.player(uuid) }
@@ -186,7 +215,11 @@ object ScreenManager {
         val facing: String,
         val state: String,
         val label: String,
-        val positionSeconds: Long,
+        /** Authorized dashboard preview source; never written to logs or HTML. */
+        val url: String,
+        val generation: Int,
+        val positionMs: Long,
+        val durationMs: Long,
         val volumePercent: Int,
     )
 
@@ -208,7 +241,10 @@ object ScreenManager {
                     facing = d.facing.serializedName,
                     state = p.state.name,
                     label = p.label,
-                    positionSeconds = p.currentPositionMs() / 1000,
+                    url = p.url,
+                    generation = p.generation,
+                    positionMs = p.currentPositionMs(),
+                    durationMs = p.durationMs,
                     volumePercent = (p.volume * 100).toInt(),
                 )
             })
@@ -250,6 +286,7 @@ object ScreenManager {
             audioLanguage = playback.audioLanguage.ifBlank { PremiereConfig.audioLanguage },
             audioDistance = PremiereConfig.audioDistance,
             state = playback.state,
+            generation = playback.generation,
             mediaPositionMs = playback.currentPositionMs(),
             volume = playback.volume,
             removed = removed,
@@ -283,8 +320,8 @@ object ScreenManager {
         }
     }
 
-    private fun save() {
-        val platform = this.platform ?: return
+    private fun save(): Boolean {
+        val platform = this.platform ?: return false
         val array = JsonArray()
         for (screen in screens.values) {
             val d = screen.definition
@@ -300,10 +337,9 @@ object ScreenManager {
             })
         }
         val root = JsonObject().apply { add("screens", array) }
-        try {
-            Files.writeString(platform.screensFile, GsonBuilder().setPrettyPrinting().create().toJson(root))
-        } catch (e: Exception) {
-            PremiereCore.LOGGER.error("Failed to save screens", e)
-        }
+        return JsonConfig.writeStringAtomic(
+            platform.screensFile,
+            GsonBuilder().setPrettyPrinting().create().toJson(root),
+        )
     }
 }

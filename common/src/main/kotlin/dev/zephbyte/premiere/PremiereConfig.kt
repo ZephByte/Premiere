@@ -1,6 +1,7 @@
 package dev.zephbyte.premiere
 
 import dev.zephbyte.premiere.util.JsonConfig
+import java.net.URI
 import java.nio.file.Path
 
 /**
@@ -21,7 +22,7 @@ object PremiereConfig {
     var audioLanguage: String = ""
         private set
 
-    // --- /pm upload: in-game link to the dashboard served by this server.
+    // --- /pm dashboard: in-game link to the dashboard served by this server.
     // The R2 credential below is deliberately the only place it lives; scope
     // the API token to this one bucket (Object Read & Write) so a leak can
     // never reach past movie files.
@@ -30,7 +31,7 @@ object PremiereConfig {
     var uploadHttpPort: Int = 8477
         private set
 
-    /** Externally reachable base for dashboard links, e.g. "http://mc.example.com:8477". */
+    /** Externally reachable base for dashboard links, ideally "https://movies.example.com". */
     var uploadPublicAddress: String = ""
         private set
 
@@ -60,21 +61,85 @@ object PremiereConfig {
     }
 
     /** Re-reads premiere.json from the directory given at startup. */
-    fun reload() {
-        JsonConfig.read(path())?.let { o ->
-            o["audio_distance"]?.let { audioDistance = it.asFloat }
-            o["audio_language"]?.let { audioLanguage = it.asString.lowercase().trim() }
-            o["upload_http_port"]?.let { uploadHttpPort = it.asInt }
-            o["upload_public_address"]?.let { uploadPublicAddress = it.asString.trimEnd('/') }
-            o["r2_account_id"]?.let { r2AccountId = it.asString }
-            o["r2_bucket"]?.let { r2Bucket = it.asString }
-            o["r2_access_key_id"]?.let { r2AccessKeyId = it.asString }
-            o["r2_secret_access_key"]?.let { r2SecretAccessKey = it.asString }
+    fun reload(): Boolean {
+        val objectFromDisk = try {
+            JsonConfig.readOrThrow(path())
+        } catch (e: Exception) {
+            PremiereCore.LOGGER.error("Premiere config is invalid; keeping the current values and leaving the file untouched", e)
+            return false
         }
-        save()
+
+        val previousAudioDistance = audioDistance
+        val previousAudioLanguage = audioLanguage
+        val previousUploadHttpPort = uploadHttpPort
+        val previousUploadPublicAddress = uploadPublicAddress
+        val previousR2AccountId = r2AccountId
+        val previousR2Bucket = r2Bucket
+        val previousR2AccessKeyId = r2AccessKeyId
+        val previousR2SecretAccessKey = r2SecretAccessKey
+
+        var nextAudioDistance = previousAudioDistance
+        var nextAudioLanguage = previousAudioLanguage
+        var nextUploadHttpPort = previousUploadHttpPort
+        var nextUploadPublicAddress = previousUploadPublicAddress
+        var nextR2AccountId = previousR2AccountId
+        var nextR2Bucket = previousR2Bucket
+        var nextR2AccessKeyId = previousR2AccessKeyId
+        var nextR2SecretAccessKey = previousR2SecretAccessKey
+
+        try {
+            objectFromDisk?.let { o ->
+                o["audio_distance"]?.let { nextAudioDistance = it.asFloat }
+                o["audio_language"]?.let { nextAudioLanguage = it.asString.lowercase().trim() }
+                o["upload_http_port"]?.let { nextUploadHttpPort = it.asInt }
+                o["upload_public_address"]?.let { nextUploadPublicAddress = it.asString.trimEnd('/') }
+                o["r2_account_id"]?.let { nextR2AccountId = it.asString.trim() }
+                o["r2_bucket"]?.let { nextR2Bucket = it.asString.trim() }
+                o["r2_access_key_id"]?.let { nextR2AccessKeyId = it.asString.trim() }
+                o["r2_secret_access_key"]?.let { nextR2SecretAccessKey = it.asString.trim() }
+            }
+            require(nextAudioDistance.isFinite() && nextAudioDistance > 0f) {
+                "audio_distance must be a positive finite number"
+            }
+            require(nextUploadHttpPort in 1..65535) {
+                "upload_http_port must be between 1 and 65535"
+            }
+            if (nextUploadPublicAddress.isNotBlank()) {
+                val uri = URI(nextUploadPublicAddress)
+                require(uri.scheme?.lowercase() in setOf("http", "https") && uri.host != null) {
+                    "upload_public_address must be an http(s) URL with a host"
+                }
+            }
+        } catch (e: Exception) {
+            PremiereCore.LOGGER.error(
+                "Premiere config values are invalid; keeping the current values and leaving the file untouched",
+                e,
+            )
+            return false
+        }
+
+        audioDistance = nextAudioDistance
+        audioLanguage = nextAudioLanguage
+        uploadHttpPort = nextUploadHttpPort
+        uploadPublicAddress = nextUploadPublicAddress
+        r2AccountId = nextR2AccountId
+        r2Bucket = nextR2Bucket
+        r2AccessKeyId = nextR2AccessKeyId
+        r2SecretAccessKey = nextR2SecretAccessKey
+        if (save()) return true
+
+        audioDistance = previousAudioDistance
+        audioLanguage = previousAudioLanguage
+        uploadHttpPort = previousUploadHttpPort
+        uploadPublicAddress = previousUploadPublicAddress
+        r2AccountId = previousR2AccountId
+        r2Bucket = previousR2Bucket
+        r2AccessKeyId = previousR2AccessKeyId
+        r2SecretAccessKey = previousR2SecretAccessKey
+        return false
     }
 
-    private fun save() = JsonConfig.write(path()) {
+    private fun save(): Boolean = JsonConfig.write(path()) {
         addProperty("audio_distance", audioDistance)
         addProperty("audio_language", audioLanguage)
         addProperty("upload_http_port", uploadHttpPort)

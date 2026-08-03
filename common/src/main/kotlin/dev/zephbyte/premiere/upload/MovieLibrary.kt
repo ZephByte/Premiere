@@ -67,14 +67,20 @@ object MovieLibrary {
         }
     }
 
+    /** Dashboard mutations/listings keep command resolution immediately fresh. */
+    fun updateCache(keys: List<String>) {
+        cachedKeys = keys
+        fetchedAt = System.currentTimeMillis()
+    }
+
+    fun invalidate() {
+        fetchedAt = 0L
+    }
+
     private fun freshKeys(): List<String> {
         if (System.currentTimeMillis() - fetchedAt >= CACHE_TTL_MS) {
-            try {
-                cachedKeys = R2Storage.listKeys()
-                fetchedAt = System.currentTimeMillis()
-            } catch (e: Exception) {
-                PremiereCore.LOGGER.warn("Could not list movie library: {}", e.message)
-            }
+            cachedKeys = R2Storage.listKeys()
+            fetchedAt = System.currentTimeMillis()
         }
         return cachedKeys
     }
@@ -87,6 +93,8 @@ object MovieLibrary {
         Thread.startVirtualThread {
             try {
                 freshKeys()
+            } catch (e: Exception) {
+                PremiereCore.LOGGER.warn("Could not refresh movie library suggestions: {}", e.message)
             } finally {
                 refreshing = false
             }

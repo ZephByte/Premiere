@@ -43,9 +43,12 @@ class RequestScreensPayload : CustomPacketPayload {
 }
 
 class ScreenReadyPayload(val msg: ScreenReadyMessage) : CustomPacketPayload {
-    constructor(screen: String) : this(ScreenReadyMessage(screen))
+    constructor(screen: String, generation: Int, durationMs: Long) :
+        this(ScreenReadyMessage(screen, generation, durationMs))
 
     val screen: String get() = msg.screen
+    val generation: Int get() = msg.generation
+    val durationMs: Long get() = msg.durationMs
 
     override fun type(): CustomPacketPayload.Type<ScreenReadyPayload> = TYPE
 
@@ -69,7 +72,12 @@ object PremiereNet {
             ScreenManager.sendAllTo(context.player().uuid)
         }
         ServerPlayNetworking.registerGlobalReceiver(ScreenReadyPayload.TYPE) { payload, context ->
-            ScreenManager.clientReportedReady(payload.screen, context.player().uuid)
+            ScreenManager.clientReportedReady(
+                payload.screen,
+                payload.generation,
+                payload.durationMs,
+                context.player().uuid,
+            )
         }
     }
 }

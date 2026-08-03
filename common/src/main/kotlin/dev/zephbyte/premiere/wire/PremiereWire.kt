@@ -20,7 +20,7 @@ object PremiereWire {
     const val REQUEST_SCREENS = "premiere:request_screens"
     const val SCREEN_READY = "premiere:screen_ready"
 
-    const val WIRE_VERSION = 1
+    const val WIRE_VERSION = 3
 
     fun writeScreenState(buf: ByteBuf, msg: ScreenStateMessage) {
         Bufs.writeVarInt(buf, WIRE_VERSION)
@@ -30,6 +30,7 @@ object PremiereWire {
         Bufs.writeUtf(buf, msg.audioLanguage)
         buf.writeFloat(msg.audioDistance)
         Bufs.writeVarInt(buf, msg.state.ordinal)
+        Bufs.writeVarInt(buf, msg.generation)
         Bufs.writeVarLong(buf, msg.mediaPositionMs)
         buf.writeFloat(msg.volume)
         buf.writeBoolean(msg.removed)
@@ -47,6 +48,7 @@ object PremiereWire {
             audioLanguage = Bufs.readUtf(buf),
             audioDistance = buf.readFloat(),
             state = PlayState.entries[Bufs.readVarInt(buf)],
+            generation = Bufs.readVarInt(buf),
             mediaPositionMs = Bufs.readVarLong(buf),
             volume = buf.readFloat(),
             removed = buf.readBoolean(),
@@ -55,9 +57,12 @@ object PremiereWire {
 
     fun writeScreenReady(buf: ByteBuf, msg: ScreenReadyMessage) {
         Bufs.writeUtf(buf, msg.screen)
+        Bufs.writeVarInt(buf, msg.generation)
+        Bufs.writeVarLong(buf, msg.durationMs)
     }
 
-    fun readScreenReady(buf: ByteBuf): ScreenReadyMessage = ScreenReadyMessage(Bufs.readUtf(buf))
+    fun readScreenReady(buf: ByteBuf): ScreenReadyMessage =
+        ScreenReadyMessage(Bufs.readUtf(buf), Bufs.readVarInt(buf), Bufs.readVarLong(buf))
 
     // RequestScreens carries no payload; nothing to read or write.
 

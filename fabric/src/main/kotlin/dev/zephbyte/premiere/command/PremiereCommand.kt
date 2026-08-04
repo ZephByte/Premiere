@@ -17,7 +17,7 @@ import net.minecraft.commands.arguments.coordinates.BlockPosArgument
 /**
  * The command tree and shared target resolution. Handlers live beside it:
  * [ScreenCommands] (wand/define/undefine), [PlaybackCommands]
- * (play/load/pause/stop/seek/volume), [AdminCommands] (dashboard/movies/
+ * (play/load/queue/pause/stop/seek/volume/radius), [AdminCommands] (dashboard/movies/
  * reload/list).
  */
 object PremiereCommand {
@@ -26,12 +26,33 @@ object PremiereCommand {
         SharedSuggestionProvider.suggest(ScreenManager.all().map { it.definition.name }, builder)
     }
 
+    private val RADIUS_SUGGESTIONS = SuggestionProvider<CommandSourceStack> { _, builder ->
+        val wordStart = builder.remaining.lastIndexOf(' ') + 1
+        val options = if (wordStart == 0) {
+            ScreenManager.all().map { it.definition.name } + "default"
+        } else {
+            listOf("default")
+        }
+        SharedSuggestionProvider.suggest(options, builder.createOffset(builder.start + wordStart))
+    }
+
     /** For play/load, the first word can be a screen or a movie. */
     private val SCREEN_OR_MOVIE_SUGGESTIONS = SuggestionProvider<CommandSourceStack> { _, builder ->
         SharedSuggestionProvider.suggest(
             ScreenManager.all().map { it.definition.name } + MovieLibrary.suggestions(),
             builder,
         )
+    }
+
+    private val QUEUE_SUGGESTIONS = SuggestionProvider<CommandSourceStack> { _, builder ->
+        val first = builder.remaining.substringBefore(' ')
+        val explicitScreen = builder.remaining.contains(' ') && ScreenManager.get(first) != null
+        val options = MovieLibrary.suggestions() + listOf("clear", "remove")
+        if (explicitScreen) {
+            SharedSuggestionProvider.suggest(options, builder.createOffset(builder.start + first.length + 1))
+        } else {
+            SharedSuggestionProvider.suggest(ScreenManager.all().map { it.definition.name } + options, builder)
+        }
     }
 
     fun register() {
@@ -71,18 +92,15 @@ object PremiereCommand {
                     .requires(MoviePerms::canControl)
                     .then(screenArg().executes(ScreenCommands::undefine))
             )
-            // Playback commands take an optional leading screen name; without
-            // one they target the nearest screen (or the only one). So
-            // `/pm play bunny` just works in the theater.
+            // Play is transport-only: movie selection always goes through
+            // /pm load so clients can prepare the opening frame and audio.
             .then(
                 Commands.literal("play")
                     .requires(MoviePerms::canControl)
                     .executes { PlaybackCommands.play(it, "") }
-                    .then(
-                        Commands.argument("args", StringArgumentType.greedyString())
-                            .suggests(SCREEN_OR_MOVIE_SUGGESTIONS)
-                            .executes { PlaybackCommands.play(it, StringArgumentType.getString(it, "args")) }
-                    )
+                    .then(screenArg().executes {
+                        PlaybackCommands.play(it, StringArgumentType.getString(it, "screen"))
+                    })
             )
             .then(
                 Commands.literal("load")
@@ -91,6 +109,16 @@ object PremiereCommand {
                         Commands.argument("args", StringArgumentType.greedyString())
                             .suggests(SCREEN_OR_MOVIE_SUGGESTIONS)
                             .executes { PlaybackCommands.load(it, StringArgumentType.getString(it, "args")) }
+                    )
+            )
+            .then(
+                Commands.literal("queue")
+                    .requires(MoviePerms::canControl)
+                    .executes { PlaybackCommands.queue(it, "") }
+                    .then(
+                        Commands.argument("args", StringArgumentType.greedyString())
+                            .suggests(QUEUE_SUGGESTIONS)
+                            .executes { PlaybackCommands.queue(it, StringArgumentType.getString(it, "args")) }
                     )
             )
             .then(
@@ -125,6 +153,16 @@ object PremiereCommand {
                         Commands.argument("args", StringArgumentType.greedyString())
                             .suggests(SCREEN_SUGGESTIONS)
                             .executes { PlaybackCommands.volume(it, StringArgumentType.getString(it, "args")) }
+                    )
+            )
+            .then(
+                Commands.literal("radius")
+                    .requires(MoviePerms::canControl)
+                    .executes { PlaybackCommands.radius(it, "") }
+                    .then(
+                        Commands.argument("args", StringArgumentType.greedyString())
+                            .suggests(RADIUS_SUGGESTIONS)
+                            .executes { PlaybackCommands.radius(it, StringArgumentType.getString(it, "args")) }
                     )
             )
             .then(

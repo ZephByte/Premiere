@@ -25,6 +25,7 @@ class PremiereWireTest {
             subtitleUrl = "https://example.com/movie.srt",
             audioLanguage = "eng",
             audioDistance = 48f,
+            audioFullVolumeRadius = 16f,
             state = PlayState.PLAYING,
             generation = 42,
             mediaPositionMs = 123_456L,

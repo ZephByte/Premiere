@@ -159,11 +159,14 @@ object ScreenRenderer {
             val phaseCos = cos(phase).toFloat()
             val phaseSin = sin(phase).toFloat()
 
-            fun vertex(span: Float, y: Float, baseU: Float, baseV: Float) {
-                val du = baseU - 0.5f
-                val dv = baseV - 0.5f
-                val u = 0.5f + du * phaseCos - dv * phaseSin
-                val v = 0.5f + du * phaseSin + dv * phaseCos
+            val centerSpan = definition.width / 2f
+            val centerY = definition.height / 2f
+
+            fun vertex(baseSpan: Float, baseY: Float, u: Float, v: Float) {
+                val localSpan = baseSpan - centerSpan
+                val localY = baseY - centerY
+                val span = centerSpan + localSpan * phaseCos - localY * phaseSin
+                val y = centerY + localSpan * phaseSin + localY * phaseCos
                 val x = if (onX) span else plane
                 val z = if (onX) plane else span
                 consumer.addVertex(pose, x, y, z)
@@ -174,8 +177,6 @@ object ScreenRenderer {
                     .setNormal(pose, normalX, 0f, normalZ)
             }
 
-            val centerSpan = definition.width / 2f
-            val centerY = definition.height / 2f
             val spanLo = centerSpan - size / 2f
             val spanHi = centerSpan + size / 2f
             val yTop = centerY + size / 2f

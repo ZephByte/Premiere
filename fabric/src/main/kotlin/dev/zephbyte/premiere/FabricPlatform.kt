@@ -1,6 +1,7 @@
 package dev.zephbyte.premiere
 
 import dev.zephbyte.premiere.command.MoviePerms
+import dev.zephbyte.premiere.command.CommandFeedback
 import dev.zephbyte.premiere.geo.Vec3d
 import dev.zephbyte.premiere.net.ScreenStatePayload
 import dev.zephbyte.premiere.platform.PlayerHandle
@@ -46,6 +47,15 @@ class FabricPlayerHandle(private val player: ServerPlayer) : PlayerHandle {
         ServerPlayNetworking.send(player, ScreenStatePayload(msg))
 
     override fun sendChat(text: String) = player.sendSystemMessage(Component.literal(text))
+
+    override fun sendLoadReady(mediaLabel: String, reporterName: String, screenName: String) {
+        val playCommand = "/pm play $screenName"
+        player.sendSystemMessage(
+            CommandFeedback.success("'$mediaLabel' is ready on $screenName. ")
+                .append(CommandFeedback.muted("Buffered by $reporterName. "))
+                .append(CommandFeedback.command("Run $playCommand", playCommand))
+        )
+    }
 
     override fun sendActionBar(text: String) = player.sendOverlayMessage(Component.literal(text))
 

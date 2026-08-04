@@ -79,7 +79,8 @@ object DashboardPage {
             overflow: hidden; align-self: start; }
   .video-shell { position: relative; aspect-ratio: 16 / 9; background: #08090b;
                  display: grid; place-items: center; overflow: hidden; }
-  #preview { width: 100%; height: 100%; object-fit: contain; display: block; cursor: pointer; }
+  #preview { position: absolute; inset: 0; width: 100%; height: 100%; min-width: 0; min-height: 0;
+             object-fit: contain; object-position: center; display: block; cursor: pointer; }
   .video-empty { position: absolute; inset: 0; display: grid; place-items: center; color: #777f8d;
                  text-align: center; padding: 2rem; box-sizing: border-box; }
   .video-empty[hidden], .buffering[hidden] { display: none; }
@@ -99,7 +100,21 @@ object DashboardPage {
   .volume-row { display: grid; grid-template-columns: auto 1fr 3.2rem; align-items: center;
                 gap: .6rem; margin-top: .8rem; color: #9aa0a6; font-size: .85rem; }
   .volume-row input { width: 100%; accent-color: #8ab4f8; }
-  .player-foot { display: flex; justify-content: space-between; gap: .5rem; margin-top: .85rem; }
+  .radius-row { display: grid; grid-template-columns: minmax(5rem, 7rem) auto 1fr; align-items: center;
+                gap: .6rem; margin-top: .7rem; color: #9aa0a6; font-size: .85rem; }
+  .radius-row label { grid-column: 1 / -1; }
+  .radius-row input { width: 100%; box-sizing: border-box; padding: .42rem .5rem; border-radius: 6px;
+                      border: 1px solid #4a5160; background: #1d2026; color: #e8e6e3; }
+  .radius-row button { justify-self: end; }
+  .queue-panel { margin-top: .85rem; border-top: 1px solid #2a2e37; padding-top: .75rem; }
+  .queue-head { display: flex; align-items: center; justify-content: space-between; gap: .6rem; }
+  .queue-head strong { font-size: .85rem; color: #c4c8ce; }
+  .queue-items { display: grid; gap: .3rem; margin-top: .45rem; }
+  .queue-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center;
+                gap: .5rem; padding: .38rem .5rem; border-radius: 6px; background: #191c22; font-size: .82rem; }
+  .queue-item-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .queue-item button { padding: .15rem .4rem; }
+  .player-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .5rem; margin-top: .85rem; }
   dialog { width: min(580px, calc(100vw - 2rem)); box-sizing: border-box; border: 1px solid #3a404b;
            border-radius: 14px; padding: 0; background: #1a1d23; color: #e8e6e3;
            box-shadow: 0 18px 70px rgb(0 0 0 / 55%); }
@@ -173,8 +188,18 @@ object DashboardPage {
             <input id="screenVolume" type="range" min="0" max="100" value="100" step="1" disabled>
             <span id="volumeValue">100%</span>
           </label>
+          <div class="radius-row"><label for="screenRadius">Full-volume radius</label>
+            <input id="screenRadius" type="number" min="0" value="16" step="0.5" disabled>
+            <span>blocks</span>
+            <button class="ghost" id="resetRadius" type="button" disabled>Use default</button>
+          </div>
+          <div class="queue-panel">
+            <div class="queue-head"><strong>Up next</strong><button class="ghost" id="clearQueue" type="button" disabled>Clear</button></div>
+            <div class="queue-items" id="screenQueue"><span class="hint">Queue is empty.</span></div>
+          </div>
           <div class="player-foot">
-            <button class="ghost" id="chooseMovie">Choose movie</button>
+            <button class="ghost" id="chooseMovie">Load movie</button>
+            <button class="ghost" id="queueMovie">Add to queue</button>
             <button class="ghost" id="togglePreview" disabled>Enable live preview</button>
             <button class="danger" id="deleteScreen">Delete screen</button>
           </div>
@@ -205,7 +230,7 @@ object DashboardPage {
     <h2>Server Settings <button class="ghost" id="reloadCfg" style="float:right">Reload config</button></h2>
     <table class="kv"><tbody id="config"><tr><td class="hint">Loading…</td></tr></tbody></table>
     <p class="hint">Edit values in <code>config/premiere.json</code> on the server, then hit
-    Reload (or run /movienight reload). Audio settings apply from the next play.</p>
+    Reload (or run /pm reload). Audio settings apply from the next play.</p>
   </section>
 </main>
 
@@ -275,11 +300,12 @@ function fmtPos(seconds) {
 
 const preview = el("preview"), timeline = el("timeline"), playerPanel = el("playerPanel");
 const videoEmpty = el("videoEmpty"), previewLoading = el("previewLoading");
-const screenVolume = el("screenVolume");
+const screenVolume = el("screenVolume"), screenRadius = el("screenRadius");
 let latestScreens = [];
 let latestMovies = [];
 let selectedScreenName = null;
 let moviePickerScreen = null;
+let moviePickerMode = "play";
 let renameKey = null;
 let previewUrl = "";
 let previewGeneration = -1;
@@ -384,10 +410,15 @@ function syncPlayer(force) {
   const active = s.state !== "STOPPED" && !!s.url;
   const authoritativeSeconds = serverSeconds(s);
   el("nowPlaying").textContent = active ? (s.label || "Untitled movie") : "Nothing playing";
-  el("playerState").textContent = s.state.toLowerCase();
+  el("playerState").textContent = s.state === "LOADED" ? (s.ready ? "ready" : "buffering") : s.state.toLowerCase();
   el("playerState").className = "state " + s.state;
-  ["timeline", "playPause", "back10", "forward10", "stopPlayback"].forEach(id => el(id).disabled = !active);
+  const transportReady = active && (s.state !== "LOADED" || !!s.ready);
+  ["timeline", "playPause", "back10", "forward10"].forEach(id => el(id).disabled = !transportReady);
+  el("stopPlayback").disabled = !active;
   screenVolume.disabled = !active;
+  screenRadius.disabled = false;
+  screenRadius.max = Math.max(0, Number(s.audioDistance) - 0.01);
+  el("resetRadius").disabled = !!s.audioFullVolumeRadiusIsDefault;
   el("togglePreview").disabled = !active;
   el("togglePreview").textContent = livePreviewEnabled ? "Disable live preview" : "Enable live preview";
   el("togglePreview").setAttribute("aria-pressed", String(livePreviewEnabled));
@@ -396,6 +427,10 @@ function syncPlayer(force) {
     screenVolume.value = s.volumePercent;
     el("volumeValue").textContent = s.volumePercent + "%";
   }
+  if (document.activeElement !== screenRadius) {
+    screenRadius.value = Number(s.audioFullVolumeRadius).toFixed(1).replace(/\.0$/, "");
+  }
+  renderQueue(s);
 
   if (!active) {
     if (previewUrl) {
@@ -488,15 +523,44 @@ function syncPlayer(force) {
   }
 }
 
-async function playMovie(screen, movie) {
+async function loadMovie(screen, movie) {
   if (livePreviewEnabled) previewLoading.hidden = false;
   try {
-    await api("/api/screen/play", { screen, movie });
+    await api("/api/screen/load", { screen, movie });
     await refreshStatus();
   } catch (e) {
     previewLoading.hidden = true;
-    alert("Could not start movie: " + e.message);
+    alert("Could not load movie: " + e.message);
   }
+}
+async function queueMovie(screen, movie) {
+  try {
+    await api("/api/screen/queue", { screen, action: "add", movie });
+    await refreshStatus();
+  } catch (e) { alert("Could not queue movie: " + e.message); }
+}
+async function changeQueue(action, index) {
+  const s = selectedScreen();
+  if (!s) return;
+  try {
+    await api("/api/screen/queue", { screen: s.name, action, index });
+    await refreshStatus();
+  } catch (e) { alert("Queue update failed: " + e.message); }
+}
+function renderQueue(s) {
+  const queued = Array.isArray(s.queue) ? s.queue : [];
+  el("clearQueue").disabled = queued.length === 0;
+  el("screenQueue").innerHTML = queued.length === 0
+    ? '<span class="hint">Queue is empty.</span>'
+    : queued.map((item, index) =>
+        '<div class="queue-item"><span class="hint">' + (index + 1) + '.</span>' +
+        '<span class="queue-item-name">' + esc(item.label) + '</span>' +
+        '<button class="ghost" type="button" data-queue-index="' + index + '" aria-label="Remove ' +
+          esc(item.label) + '">&times;</button></div>'
+      ).join("");
+  el("screenQueue").querySelectorAll("[data-queue-index]").forEach(button => {
+    button.onclick = () => changeQueue("remove", Number(button.dataset.queueIndex));
+  });
 }
 function delScreen(screen) {
   if (!confirm("Delete screen '" + screen + "'? This stops any playback and removes its definition.")) return;
@@ -562,8 +626,13 @@ el("stopPlayback").onclick = () => {
 };
 el("chooseMovie").onclick = () => {
   const s = selectedScreen();
-  if (s) openMoviePicker(s.name);
+  if (s) openMoviePicker(s.name, "load");
 };
+el("queueMovie").onclick = () => {
+  const s = selectedScreen();
+  if (s) openMoviePicker(s.name, "queue");
+};
+el("clearQueue").onclick = () => changeQueue("clear");
 el("togglePreview").onclick = () => {
   livePreviewEnabled = !livePreviewEnabled;
   syncPlayer(true);
@@ -583,6 +652,28 @@ screenVolume.addEventListener("change", async () => {
     await refreshStatus();
   } catch (e) { alert("Volume failed: " + e.message); }
 });
+screenRadius.addEventListener("change", async () => {
+  const s = selectedScreen();
+  if (!s) return;
+  const radius = Number(screenRadius.value);
+  if (!Number.isFinite(radius) || radius < 0 || radius >= Number(s.audioDistance)) {
+    alert("Radius must be at least 0 and less than " + s.audioDistance + " blocks.");
+    syncPlayer(false);
+    return;
+  }
+  try {
+    await api("/api/screen/radius", { screen: s.name, radius });
+    await refreshStatus();
+  } catch (e) { alert("Radius failed: " + e.message); syncPlayer(false); }
+});
+el("resetRadius").onclick = async () => {
+  const s = selectedScreen();
+  if (!s) return;
+  try {
+    await api("/api/screen/radius", { screen: s.name, useDefault: true });
+    await refreshStatus();
+  } catch (e) { alert("Radius reset failed: " + e.message); }
+};
 
 async function loadMovies() {
   const { movies } = await api("/api/list");
@@ -599,7 +690,7 @@ function renderMovieLibrary() {
       return '<tr><td>' + esc(m.name) + (isSub ? ' <span class="hint">(subtitles)</span>' : '') + '</td>' +
       '<td class="num">' + fmtSize(m.size) + '</td>' +
       '<td>' + esc((m.lastModified || "").slice(0, 10)) + '</td>' +
-      '<td>' + (isSub ? '' : '<button class="ghost" onclick="copyPlay(' + jsarg(m.name) + ', this)">Copy play command</button>') + '</td>' +
+      '<td>' + (isSub ? '' : '<button class="ghost" onclick="copyPlay(' + jsarg(m.name) + ', this)">Copy load command</button>') + '</td>' +
       '<td><button class="ghost" onclick="openRename(' + jsarg(m.key) + ', ' + jsarg(m.name) + ')">Rename</button></td>' +
       '<td><button class="danger" onclick="del(' + jsarg(m.key) + ')">Delete</button></td></tr>';
     }).join("");
@@ -634,14 +725,17 @@ function renderMovieChoices() {
       const screen = moviePickerScreen;
       if (!screen) return;
       el("moviePicker").close();
-      await playMovie(screen, btn.dataset.movieKey);
+      if (moviePickerMode === "queue") await queueMovie(screen, btn.dataset.movieKey);
+      else await loadMovie(screen, btn.dataset.movieKey);
     };
   });
 }
 
-async function openMoviePicker(screen) {
+async function openMoviePicker(screen, mode) {
   moviePickerScreen = screen;
-  el("moviePickerScreen").textContent = "Play on " + screen;
+  moviePickerMode = mode || "load";
+  el("moviePickerHeading").textContent = moviePickerMode === "queue" ? "Add to queue" : "Load movie";
+  el("moviePickerScreen").textContent = (moviePickerMode === "queue" ? "Queue on " : "Load on ") + screen;
   el("movieSearch").value = "";
   el("movieChoices").innerHTML = '<p class="hint">Loading movies…</p>';
   el("moviePicker").showModal();
@@ -692,8 +786,8 @@ el("renameForm").addEventListener("submit", async e => {
 });
 
 function copyPlay(name, btn) {
-  navigator.clipboard.writeText("/pm play <screen> " + name)
-    .then(() => { btn.textContent = "Copied!"; setTimeout(() => btn.textContent = "Copy play command", 1500); });
+  navigator.clipboard.writeText("/pm load <screen> " + name)
+    .then(() => { btn.textContent = "Copied!"; setTimeout(() => btn.textContent = "Copy load command", 1500); });
 }
 
 async function del(key) {
@@ -739,8 +833,8 @@ async function upload(f) {
   xhr.onload = () => {
     uploadDone();
     if (xhr.status >= 200 && xhr.status < 300) {
-      const cmd = "/pm play <screen> " + signed.name;
-      out.innerHTML = '<p>Uploaded as <b>' + esc(signed.name) + '</b>. Play it with:</p>' +
+      const cmd = "/pm load <screen> " + signed.name;
+      out.innerHTML = '<p>Uploaded as <b>' + esc(signed.name) + '</b>. Prepare it with:</p>' +
         '<div class="result">' + esc(cmd) + '</div>' +
         '<button id="copy">Copy command</button>';
       el("copy").onclick = () => navigator.clipboard.writeText(cmd)

@@ -1,11 +1,14 @@
 package dev.zephbyte.premiere.client
 
 import dev.zephbyte.premiere.Premiere
+import dev.zephbyte.premiere.audio.ScreenAudioZone
 import dev.zephbyte.premiere.client.video.VideoPlayer
 import dev.zephbyte.premiere.net.ScreenStatePayload
 import dev.zephbyte.premiere.toVec3
+import dev.zephbyte.premiere.toVec3d
 import dev.zephbyte.premiere.screen.PlayState
 import dev.zephbyte.premiere.screen.ScreenDefinition
+import dev.zephbyte.premiere.screen.ScreenManager
 import dev.zephbyte.premiere.util.MediaUrls
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -37,6 +40,9 @@ object ClientScreens {
 
         @Volatile
         var audioDistance: Float = 48f
+
+        @Volatile
+        var audioFullVolumeRadius: Float = 16f
 
         @Volatile
         var audioLanguage: String = ""
@@ -73,7 +79,6 @@ object ClientScreens {
      * Screens outside the player's current dimension or theater area remain
      * cheap snapshots until the player approaches them.
      */
-    private const val MIN_ACTIVATION_DISTANCE = 128.0
     private const val DEACTIVATION_HYSTERESIS = 32.0
     private const val RETRY_DELAY_MS = 10_000L
     private val screens = ConcurrentHashMap<String, ActiveScreen>()
@@ -97,6 +102,7 @@ object ClientScreens {
         active.subtitleUrl = msg.subtitleUrl
         active.url = msg.url
         active.audioDistance = msg.audioDistance
+        active.audioFullVolumeRadius = msg.audioFullVolumeRadius
         active.audioLanguage = msg.audioLanguage
         active.generation = msg.generation
         active.mediaPositionMs = msg.mediaPositionMs
@@ -184,6 +190,16 @@ object ClientScreens {
             active.lastAppliedState = active.state
         }
         player.setVolume(active.volume)
+        Minecraft.getInstance().player?.position()?.toVec3d()?.let { listener ->
+            player.setDistanceGain(
+                ScreenAudioZone.gain(
+                    active.definition,
+                    listener,
+                    active.audioFullVolumeRadius,
+                    active.audioDistance,
+                )
+            )
+        }
     }
 
     private fun shouldDecode(active: ActiveScreen): Boolean {
@@ -191,7 +207,7 @@ object ClientScreens {
         val player = minecraft.player ?: return false
         val level = minecraft.level ?: return false
         if (active.definition.dimension != level.dimension().identifier().toString()) return false
-        val base = maxOf(MIN_ACTIVATION_DISTANCE, active.audioDistance.toDouble())
+        val base = maxOf(ScreenManager.CLIENT_ACTIVATION_DISTANCE, active.audioDistance.toDouble())
         val limit = base + if (active.player != null) DEACTIVATION_HYSTERESIS else 0.0
         return player.position().distanceToSqr(active.definition.faceCenter().toVec3()) <= limit * limit
     }

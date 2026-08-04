@@ -67,7 +67,7 @@ internal object AdminCommands {
                         val movie = displayName.removeSuffix(" (cc)")
                         source.sendSuccess({
                             Component.literal("  • ").withStyle(ChatFormatting.DARK_GRAY)
-                                .append(CommandFeedback.command(displayName, "/pm play $movie"))
+                                .append(CommandFeedback.command(displayName, "/pm load $movie"))
                         }, false)
                     }
                 }
@@ -114,6 +114,16 @@ internal object AdminCommands {
                     .append(Component.literal(d.name).withStyle(ChatFormatting.WHITE, ChatFormatting.BOLD))
                     .append(Component.literal("  $status").withStyle(color))
                     .append(Component.literal("  ${d.width}×${d.height} ${d.facing.serializedName}").withStyle(ChatFormatting.GRAY))
+                    .append(
+                        Component.literal(
+                            "  full audio ${PlaybackCommands.blocks(screen.effectiveAudioFullVolumeRadius())}b" +
+                                if (screen.audioFullVolumeRadiusOverride == null) " default" else " custom",
+                        ).withStyle(ChatFormatting.DARK_GRAY),
+                    )
+                    .append(
+                        if (screen.queue.isEmpty()) Component.empty()
+                        else Component.literal("  ${screen.queue.size} queued").withStyle(ChatFormatting.AQUA),
+                    )
                     .append(
                         if (p.state == PlayState.STOPPED) Component.empty()
                         else Component.literal("  ${Times.format(p.currentPositionMs())} • ${p.label}")

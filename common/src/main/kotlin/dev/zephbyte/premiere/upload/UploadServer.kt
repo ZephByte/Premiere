@@ -7,6 +7,7 @@ import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import dev.zephbyte.premiere.PremiereCore
 import dev.zephbyte.premiere.PremiereConfig
+import dev.zephbyte.premiere.screen.QueuedMedia
 import dev.zephbyte.premiere.screen.ScreenManager
 import java.net.DatagramSocket
 import java.net.Inet4Address
@@ -286,9 +287,18 @@ object UploadServer {
                         addProperty("label", s.label)
                         addProperty("url", s.url)
                         addProperty("generation", s.generation)
+                        addProperty("ready", s.ready)
                         addProperty("positionMs", s.positionMs)
                         addProperty("durationMs", s.durationMs)
                         addProperty("volumePercent", s.volumePercent)
+                        addProperty("audioDistance", s.audioDistance)
+                        addProperty("audioFullVolumeRadius", s.audioFullVolumeRadius)
+                        addProperty("audioFullVolumeRadiusIsDefault", s.audioFullVolumeRadiusIsDefault)
+                        add("queue", JsonArray().apply {
+                            s.queue.forEach { queued ->
+                                add(JsonObject().apply { addProperty("label", queued.label) })
+                            }
+                        })
                     })
                 }
                 respond(exchange, 200, "application/json", JsonObject().apply { add("screens", screens) }.toString())
@@ -307,7 +317,7 @@ object UploadServer {
                                 ScreenManager.togglePause(screen); null
                             }
                             PlayState.LOADED -> {
-                                ScreenManager.start(screen); null
+                                if (ScreenManager.start(screen)) null else "'$name' is still buffering on viewers' clients"
                             }
                             else -> "Nothing is playing on '$name'"
                         }
@@ -315,7 +325,7 @@ object UploadServer {
                     "play" -> ScreenManager.dashboardAction(name) { screen ->
                         when (screen.playback.state) {
                             PlayState.PAUSED, PlayState.LOADED -> {
-                                ScreenManager.start(screen); null
+                                if (ScreenManager.start(screen)) null else "'$name' is still buffering on viewers' clients"
                             }
                             PlayState.PLAYING -> null
                             PlayState.STOPPED -> "Nothing is loaded on '$name'"
@@ -385,7 +395,87 @@ object UploadServer {
                 else respond(exchange, 200, "application/json", "{}")
             }
 
-            "/api/screen/play" -> {
+            "/api/screen/radius" -> {
+                val name = body["screen"]?.asString ?: ""
+                val useDefault = body["useDefault"]?.let {
+                    runCatching { it.asBoolean }.getOrDefault(false)
+                } ?: false
+                val radius = if (useDefault) null else body["radius"]?.let {
+                    runCatching { it.asFloat }.getOrNull()
+                }
+                if (!useDefault && (radius == null || !radius.isFinite() ||
+                        radius < 0f || radius >= PremiereConfig.audioDistance)
+                ) {
+                    respond(
+                        exchange,
+                        400,
+                        "application/json",
+                        error("Audience radius must be at least 0 and less than ${PremiereConfig.audioDistance} blocks"),
+                    )
+                    return
+                }
+                val actionError = ScreenManager.dashboardAction(name) { screen ->
+                    if (ScreenManager.setAudioFullVolumeRadius(screen, radius)) null
+                    else "Could not save '$name'; its audience radius is unchanged"
+                }.get(3, TimeUnit.SECONDS)
+                if (actionError != null) respond(exchange, 400, "application/json", error(actionError))
+                else respond(exchange, 200, "application/json", "{}")
+            }
+
+            "/api/screen/queue" -> {
+                val name = body["screen"]?.asString ?: ""
+                val action = body["action"]?.asString ?: ""
+                val actionError = when (action) {
+                    "add" -> {
+                        val movie = body["movie"]?.asString?.trim() ?: ""
+                        if (movie.isEmpty()) {
+                            respond(exchange, 400, "application/json", error("No movie given"))
+                            return
+                        }
+                        val resolved = try {
+                            MediaResolver.resolve(movie)
+                        } catch (e: Exception) {
+                            respond(exchange, 400, "application/json", error(e.message ?: "Could not resolve that"))
+                            return
+                        }
+                        ScreenManager.dashboardAction(name) { screen ->
+                            val media = QueuedMedia(resolved.url, resolved.label, resolved.subtitleUrl)
+                            ScreenManager.enqueue(screen, media)
+                            if (screen.playback.state == PlayState.STOPPED) {
+                                ScreenManager.loadNext(screen)
+                            }
+                            null
+                        }
+                    }
+                    "remove" -> {
+                        val index = body["index"]?.let { runCatching { it.asInt }.getOrNull() }
+                        if (index == null || index < 0) {
+                            respond(exchange, 400, "application/json", error("Invalid queue position"))
+                            return
+                        }
+                        ScreenManager.dashboardAction(name) { screen ->
+                            if (ScreenManager.removeQueued(screen, index) == null) {
+                                "That queue item no longer exists"
+                            } else {
+                                null
+                            }
+                        }
+                    }
+                    "clear" -> ScreenManager.dashboardAction(name) { screen ->
+                        ScreenManager.clearQueue(screen)
+                        null
+                    }
+                    else -> java.util.concurrent.CompletableFuture.completedFuture("Unknown queue action '$action'")
+                }.get(3, TimeUnit.SECONDS)
+                if (actionError != null) {
+                    respond(exchange, 400, "application/json", error(actionError))
+                } else {
+                    PremiereCore.LOGGER.info("Dashboard: queue {} on '{}'", action, name)
+                    respond(exchange, 200, "application/json", "{}")
+                }
+            }
+
+            "/api/screen/load" -> {
                 val name = body["screen"]?.asString ?: ""
                 val movie = body["movie"]?.asString?.trim() ?: ""
                 if (movie.isEmpty()) {
@@ -400,13 +490,13 @@ object UploadServer {
                     return
                 }
                 val error = ScreenManager.dashboardAction(name) { screen ->
-                    ScreenManager.play(screen, resolved.url, resolved.label, resolved.subtitleUrl)
+                    ScreenManager.load(screen, resolved.url, resolved.label, resolved.subtitleUrl, "", null)
                     null
                 }.get(3, TimeUnit.SECONDS)
                 if (error != null) {
                     respond(exchange, 400, "application/json", error(error))
                 } else {
-                    PremiereCore.LOGGER.info("Dashboard: playing '{}' on '{}'", resolved.label, name)
+                    PremiereCore.LOGGER.info("Dashboard: loading '{}' on '{}'", resolved.label, name)
                     respond(exchange, 200, "application/json", "{}")
                 }
             }
@@ -434,6 +524,7 @@ object UploadServer {
     /** Operator-visible settings only — never the R2 credentials. */
     private fun configJson(): String = JsonObject().apply {
         addProperty("audio_distance", PremiereConfig.audioDistance)
+        addProperty("audio_full_volume_radius", PremiereConfig.audioFullVolumeRadius)
         addProperty("audio_language", PremiereConfig.audioLanguage.ifBlank { "(file default)" })
         addProperty("upload_http_port", PremiereConfig.uploadHttpPort)
         addProperty("upload_public_address", PremiereConfig.uploadPublicAddress)

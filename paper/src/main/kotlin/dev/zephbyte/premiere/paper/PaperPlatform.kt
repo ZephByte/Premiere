@@ -7,6 +7,9 @@ import dev.zephbyte.premiere.wire.PremiereWire
 import dev.zephbyte.premiere.wire.ScreenStateMessage
 import io.netty.buffer.Unpooled
 import net.kyori.adventure.text.Component
+import net.kyori.adventure.text.event.ClickEvent
+import net.kyori.adventure.text.format.NamedTextColor
+import net.kyori.adventure.text.format.TextDecoration
 import org.bukkit.Bukkit
 import org.bukkit.entity.Player
 import java.nio.file.Path
@@ -65,6 +68,22 @@ class PaperPlayerHandle(
     }
 
     override fun sendChat(text: String) = player.sendMessage(Component.text(text))
+
+    override fun sendLoadReady(mediaLabel: String, reporterName: String, screenName: String) {
+        val playCommand = "/pm play $screenName"
+        player.sendMessage(
+            Component.text("Premiere ", NamedTextColor.DARK_PURPLE)
+                .decorate(TextDecoration.BOLD)
+                .append(Component.text("✓ ", NamedTextColor.GREEN))
+                .append(Component.text("'$mediaLabel' is ready on $screenName. ", NamedTextColor.GRAY))
+                .append(Component.text("Buffered by $reporterName. ", NamedTextColor.DARK_GRAY))
+                .append(
+                    Component.text("Run $playCommand", NamedTextColor.AQUA)
+                        .decorate(TextDecoration.UNDERLINED)
+                        .clickEvent(ClickEvent.suggestCommand(playCommand))
+                )
+        )
+    }
 
     override fun sendActionBar(text: String) = player.sendActionBar(Component.text(text))
 

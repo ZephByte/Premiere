@@ -11,6 +11,7 @@ import dev.zephbyte.premiere.geo.ScreenPos
 import dev.zephbyte.premiere.geo.Vec3d
 import dev.zephbyte.premiere.screen.ManagedScreen
 import dev.zephbyte.premiere.screen.PlayState
+import dev.zephbyte.premiere.screen.QueuedMedia
 import dev.zephbyte.premiere.screen.ScreenDefinition
 import dev.zephbyte.premiere.screen.ScreenManager
 import dev.zephbyte.premiere.screen.ScreenTargeting
@@ -31,6 +32,7 @@ import net.kyori.adventure.text.format.TextDecoration
 import org.bukkit.Bukkit
 import org.bukkit.command.CommandSender
 import org.bukkit.entity.Player
+import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
 /**
@@ -90,11 +92,7 @@ object PaperCommands {
                 Commands.literal("play")
                     .requires(::canControl)
                     .executes { play(it, "") }
-                    .then(
-                        Commands.argument("args", StringArgumentType.greedyString())
-                            .suggests { _, b -> suggest(b, screenAndMovieNames()) }
-                            .executes { play(it, StringArgumentType.getString(it, "args")) }
-                    )
+                    .then(screenArg().executes { play(it, StringArgumentType.getString(it, "screen")) })
             )
             .then(
                 Commands.literal("load")
@@ -103,6 +101,16 @@ object PaperCommands {
                         Commands.argument("args", StringArgumentType.greedyString())
                             .suggests { _, b -> suggest(b, screenAndMovieNames()) }
                             .executes { load(it, StringArgumentType.getString(it, "args")) }
+                    )
+            )
+            .then(
+                Commands.literal("queue")
+                    .requires(::canControl)
+                    .executes { queue(it, "") }
+                    .then(
+                        Commands.argument("args", StringArgumentType.greedyString())
+                            .suggests { _, b -> queueSuggestions(b) }
+                            .executes { queue(it, StringArgumentType.getString(it, "args")) }
                     )
             )
             .then(
@@ -135,6 +143,20 @@ object PaperCommands {
                             .executes { volume(it, StringArgumentType.getString(it, "args")) }
                     )
             )
+            .then(
+                Commands.literal("radius")
+                    .requires(::canControl)
+                    .executes { radius(it, "") }
+                    .then(
+                        Commands.argument("args", StringArgumentType.greedyString())
+                            .suggests { _, b ->
+                                val wordStart = b.remaining.lastIndexOf(' ') + 1
+                                val options = if (wordStart == 0) screenNames() + "default" else listOf("default")
+                                suggest(b.createOffset(b.start + wordStart), options)
+                            }
+                            .executes { radius(it, StringArgumentType.getString(it, "args")) }
+                    )
+            )
             .then(Commands.literal("dashboard").requires(::canControl).executes(::dashboard))
             .then(Commands.literal("dash").requires(::canControl).executes(::dashboard))
             .then(Commands.literal("movies").requires(::canControl).executes(::movies))
@@ -148,6 +170,17 @@ object PaperCommands {
     private fun screenNames() = ScreenManager.all().map { it.definition.name }
 
     private fun screenAndMovieNames() = screenNames() + MovieLibrary.suggestions()
+
+    private fun queueSuggestions(builder: SuggestionsBuilder): CompletableFuture<com.mojang.brigadier.suggestion.Suggestions> {
+        val first = builder.remaining.substringBefore(' ')
+        val explicitScreen = builder.remaining.contains(' ') && ScreenManager.get(first) != null
+        val options = MovieLibrary.suggestions() + listOf("clear", "remove")
+        return if (explicitScreen) {
+            suggest(builder.createOffset(builder.start + first.length + 1), options)
+        } else {
+            suggest(builder, screenNames() + options)
+        }
+    }
 
     private fun suggest(builder: SuggestionsBuilder, options: List<String>): CompletableFuture<com.mojang.brigadier.suggestion.Suggestions> {
         val remaining = builder.remainingLowerCase
@@ -313,17 +346,11 @@ object PaperCommands {
     private fun play(context: CommandContext<CommandSourceStack>, args: String): Int {
         val source = context.source
         val (screen, rest) = targetAndRest(source, args) ?: return 0
-        if (rest.isEmpty()) return roll(source, screen)
-        val (input, audioLanguage) = parseAudioFlag(rest)
-        resolveMedia(source, input) { resolved ->
-            ScreenManager.play(screen, resolved.url, resolved.label, resolved.subtitleUrl, audioLanguage)
-            val notes = buildString {
-                if (resolved.subtitleUrl.isNotEmpty()) append(" (subtitles available)")
-                if (audioLanguage.isNotEmpty()) append(" [audio: $audioLanguage]")
-            }
-            ok(source, "Now playing ${resolved.label} on ${screen.definition.name}$notes")
+        if (rest.isNotEmpty()) {
+            fail(source, "Movies must be prepared first. Use /pm load [screen] <movie or URL>, then /pm play when it is ready.")
+            return 0
         }
-        return 1
+        return roll(source, screen)
     }
 
     private fun load(context: CommandContext<CommandSourceStack>, args: String): Int {
@@ -341,6 +368,57 @@ object PaperCommands {
                 playerOf(source)?.uniqueId,
             )
             ok(source, "Preparing ${resolved.label} on ${screen.definition.name}. You'll be notified when the first frame is ready.")
+        }
+        return 1
+    }
+
+    private fun queue(context: CommandContext<CommandSourceStack>, args: String): Int {
+        val source = context.source
+        val (screen, rest) = targetAndRest(source, args) ?: return 0
+        if (rest.isEmpty()) {
+            if (screen.queue.isEmpty()) {
+                note(source, "${screen.definition.name}'s queue is empty.")
+                return 1
+            }
+            source.sender.sendMessage(info("Up next on ${screen.definition.name} — ${screen.queue.size} queued"))
+            screen.queue.forEachIndexed { index, media ->
+                source.sender.sendMessage(
+                    Component.text("  ${index + 1}. ", NamedTextColor.DARK_GRAY)
+                        .append(Component.text(media.label, NamedTextColor.WHITE))
+                        .append(Component.text("  ", NamedTextColor.DARK_GRAY))
+                        .append(command("[remove]", "/pm queue ${screen.definition.name} remove ${index + 1}"))
+                )
+            }
+            return screen.queue.size
+        }
+        if (rest.equals("clear", ignoreCase = true)) {
+            val count = ScreenManager.clearQueue(screen)
+            ok(source, "Cleared $count queued ${if (count == 1) "movie" else "movies"} from ${screen.definition.name}.")
+            return 1
+        }
+        if (rest.startsWith("remove ", ignoreCase = true)) {
+            val index = rest.substringAfter(' ').trim().toIntOrNull()
+            val removed = index?.let { ScreenManager.removeQueued(screen, it - 1) }
+            if (removed == null) {
+                fail(source, "Choose a queue number from 1 to ${screen.queue.size}.")
+                return 0
+            }
+            ok(source, "Removed ${removed.label} from ${screen.definition.name}'s queue.")
+            return 1
+        }
+        val (input, audioLanguage) = parseAudioFlag(rest)
+        resolveMedia(source, input) { resolved ->
+            val media = QueuedMedia(resolved.url, resolved.label, resolved.subtitleUrl, audioLanguage)
+            val position = ScreenManager.enqueue(screen, media)
+            if (screen.playback.state == PlayState.STOPPED) {
+                ScreenManager.loadNext(screen, playerOf(source)?.uniqueId)
+                ok(
+                    source,
+                    "Preparing ${screen.playback.label} on ${screen.definition.name}; it will roll when viewers are ready and ${screen.queue.size} remain queued.",
+                )
+            } else {
+                ok(source, "Queued ${resolved.label} as #$position on ${screen.definition.name}.")
+            }
         }
         return 1
     }
@@ -406,12 +484,63 @@ object PaperCommands {
         return 1
     }
 
+    private fun radius(context: CommandContext<CommandSourceStack>, args: String): Int {
+        val source = context.source
+        val (screen, rest) = targetAndRest(source, args) ?: return 0
+        if (rest.isEmpty()) {
+            val origin = if (screen.audioFullVolumeRadiusOverride == null) "config default" else "screen override"
+            note(
+                source,
+                "${screen.definition.name} has a ${blocks(screen.effectiveAudioFullVolumeRadius())}-block full-volume audience radius ($origin).",
+            )
+            return 1
+        }
+        if (rest.equals("default", ignoreCase = true)) {
+            if (!ScreenManager.setAudioFullVolumeRadius(screen, null)) {
+                fail(source, "Couldn't save ${screen.definition.name}; its audience radius is unchanged.")
+                return 0
+            }
+            ok(
+                source,
+                "${screen.definition.name} now follows the ${blocks(PremiereConfig.audioFullVolumeRadius)}-block config default.",
+            )
+            return 1
+        }
+        val radius = rest.toFloatOrNull()?.takeIf {
+            it.isFinite() && it >= 0f && it < PremiereConfig.audioDistance
+        }
+        if (radius == null) {
+            fail(
+                source,
+                "Radius must be at least 0 and below ${blocks(PremiereConfig.audioDistance)} blocks, or 'default'.",
+            )
+            return 0
+        }
+        if (!ScreenManager.setAudioFullVolumeRadius(screen, radius)) {
+            fail(source, "Couldn't save ${screen.definition.name}; its audience radius is unchanged.")
+            return 0
+        }
+        ok(source, "Set ${screen.definition.name}'s full-volume audience radius to ${blocks(radius)} blocks.")
+        return 1
+    }
+
+    private fun blocks(value: Float): String =
+        if (value % 1f == 0f) value.toInt().toString() else String.format(Locale.ROOT, "%.1f", value)
+
     /** Bare play: roll a loaded film (or resume a paused one). */
     private fun roll(source: CommandSourceStack, screen: ManagedScreen): Int {
         return when (screen.playback.state) {
-            PlayState.LOADED, PlayState.PAUSED -> {
-                ScreenManager.start(screen)
+            PlayState.LOADED -> {
+                if (!ScreenManager.start(screen)) {
+                    fail(source, "${screen.playback.label} is still buffering on viewers' clients.")
+                    return 0
+                }
                 ok(source, "Rolling ${screen.playback.label} on ${screen.definition.name}.")
+                1
+            }
+            PlayState.PAUSED -> {
+                ScreenManager.start(screen)
+                ok(source, "Resumed ${screen.playback.label} on ${screen.definition.name}.")
                 1
             }
             PlayState.PLAYING -> {
@@ -419,7 +548,7 @@ object PaperCommands {
                 0
             }
             PlayState.STOPPED -> {
-                fail(source, "Nothing is loaded. Use /pm load <movie> or /pm play <movie>.")
+                fail(source, "Nothing is loaded. Use /pm load [screen] <movie or URL> first.")
                 0
             }
         }
@@ -501,7 +630,7 @@ object PaperCommands {
                         val movie = displayName.removeSuffix(" (cc)")
                         source.sender.sendMessage(
                             Component.text("  • ", NamedTextColor.DARK_GRAY)
-                                .append(command(displayName, "/pm play $movie"))
+                                .append(command(displayName, "/pm load $movie"))
                         )
                     }
                 }
@@ -548,6 +677,17 @@ object PaperCommands {
                 .append(Component.text(d.name, NamedTextColor.WHITE).decorate(TextDecoration.BOLD))
                 .append(Component.text("  $status", color))
                 .append(Component.text("  ${d.width}×${d.height} ${d.facing.serializedName}", NamedTextColor.GRAY))
+                .append(
+                    Component.text(
+                        "  full audio ${blocks(screen.effectiveAudioFullVolumeRadius())}b" +
+                            if (screen.audioFullVolumeRadiusOverride == null) " default" else " custom",
+                        NamedTextColor.DARK_GRAY,
+                    ),
+                )
+                .append(
+                    if (screen.queue.isEmpty()) Component.empty()
+                    else Component.text("  ${screen.queue.size} queued", NamedTextColor.AQUA),
+                )
             if (p.state != PlayState.STOPPED) {
                 line = line.append(
                     Component.text("  ${Times.format(p.currentPositionMs())} • ${p.label}", NamedTextColor.DARK_GRAY)

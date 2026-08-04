@@ -19,6 +19,7 @@ data class ScreenStateMessage(
     val subtitleUrl: String,
     val audioLanguage: String,
     val audioDistance: Float,
+    val audioFullVolumeRadius: Float,
     val state: PlayState,
     /** Changes whenever the media timeline must be rebuilt (fresh play/load/seek). */
     val generation: Int,

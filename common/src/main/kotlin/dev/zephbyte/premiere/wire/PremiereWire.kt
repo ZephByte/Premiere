@@ -20,7 +20,7 @@ object PremiereWire {
     const val REQUEST_SCREENS = "premiere:request_screens"
     const val SCREEN_READY = "premiere:screen_ready"
 
-    const val WIRE_VERSION = 3
+    const val WIRE_VERSION = 4
 
     fun writeScreenState(buf: ByteBuf, msg: ScreenStateMessage) {
         Bufs.writeVarInt(buf, WIRE_VERSION)
@@ -29,6 +29,7 @@ object PremiereWire {
         Bufs.writeUtf(buf, msg.subtitleUrl)
         Bufs.writeUtf(buf, msg.audioLanguage)
         buf.writeFloat(msg.audioDistance)
+        buf.writeFloat(msg.audioFullVolumeRadius)
         Bufs.writeVarInt(buf, msg.state.ordinal)
         Bufs.writeVarInt(buf, msg.generation)
         Bufs.writeVarLong(buf, msg.mediaPositionMs)
@@ -47,6 +48,7 @@ object PremiereWire {
             subtitleUrl = Bufs.readUtf(buf),
             audioLanguage = Bufs.readUtf(buf),
             audioDistance = buf.readFloat(),
+            audioFullVolumeRadius = buf.readFloat(),
             state = PlayState.entries[Bufs.readVarInt(buf)],
             generation = Bufs.readVarInt(buf),
             mediaPositionMs = Bufs.readVarLong(buf),

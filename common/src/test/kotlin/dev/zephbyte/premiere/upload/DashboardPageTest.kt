@@ -15,6 +15,14 @@ class DashboardPageTest {
         assertContains(html, """/api/screen/seek""")
         assertContains(html, """positionMs""")
         assertContains(html, """/api/screen/volume""")
+        assertContains(html, """id="screenRadius"""")
+        assertContains(html, """/api/screen/radius""")
+        assertContains(html, """id="resetRadius"""")
+        assertContains(html, """object-fit: contain""")
+        assertContains(html, """id="screenQueue"""")
+        assertContains(html, """id="queueMovie"""")
+        assertContains(html, """/api/screen/queue""")
+        assertContains(html, """/api/screen/load""")
     }
 
     @Test

@@ -13,17 +13,38 @@ import dev.zephbyte.premiere.platform.PremierePlatform
 import dev.zephbyte.premiere.util.JsonConfig
 import dev.zephbyte.premiere.wire.ScreenStateMessage
 import java.nio.file.Files
+import java.util.ArrayDeque
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 
-class ManagedScreen(val definition: ScreenDefinition) {
+class ManagedScreen(
+    val definition: ScreenDefinition,
+    var audioFullVolumeRadiusOverride: Float? = null,
+) {
     val playback = Playback()
+    val queue = ArrayDeque<QueuedMedia>()
+
+    fun effectiveAudioFullVolumeRadius(): Float {
+        val maximum = Math.nextDown(PremiereConfig.audioDistance).coerceAtLeast(0f)
+        return (audioFullVolumeRadiusOverride ?: PremiereConfig.audioFullVolumeRadius)
+            .coerceIn(0f, maximum)
+    }
 
     /** Who ran /pm load, for the "it's buffered" ping. */
     var loaderUuid: UUID? = null
     var readyNotified = false
+    val awaitingReady = mutableSetOf<UUID>()
+    val readyClients = mutableSetOf<UUID>()
+    var autoStartWhenReady = false
 }
+
+data class QueuedMedia(
+    val url: String,
+    val label: String,
+    val subtitleUrl: String = "",
+    val audioLanguage: String = "",
+)
 
 /**
  * Server-side registry of screens, platform-free: everything server-specific
@@ -45,6 +66,9 @@ object ScreenManager {
      */
     const val REBROADCAST_TICKS = 200
 
+    /** Must match the client decoder activation range. */
+    const val CLIENT_ACTIVATION_DISTANCE = 128.0
+
     /** Server is up; load geometry and start serving. */
     fun start(platform: PremierePlatform) {
         this.platform = platform
@@ -59,6 +83,23 @@ object ScreenManager {
     fun rebroadcastPlaying() {
         screens.values.filter { it.playback.state == PlayState.PLAYING }
             .forEach { broadcast(it) }
+    }
+
+    /** Advances finished screens promptly; called once per server tick. */
+    fun tick() {
+        for (screen in screens.values) {
+            val playback = screen.playback
+            if (playback.state == PlayState.LOADED && screen.autoStartWhenReady) {
+                pruneUnavailableViewers(screen)
+                if (screen.readyClients.isNotEmpty() && screen.awaitingReady.isEmpty()) {
+                    finishPreparing(screen, reporterName = null)
+                }
+                continue
+            }
+            if (playback.state != PlayState.PLAYING || playback.durationMs <= 0) continue
+            if (playback.currentPositionMs() < playback.durationMs) continue
+            if (!loadNext(screen)) stop(screen)
+        }
     }
 
     fun all(): List<ManagedScreen> = screens.values.sortedBy { it.definition.name }
@@ -112,7 +153,7 @@ object ScreenManager {
      */
     fun redefine(definition: ScreenDefinition): Boolean {
         val old = screens[definition.name] ?: return false
-        val replacement = ManagedScreen(definition)
+        val replacement = ManagedScreen(definition, old.audioFullVolumeRadiusOverride)
         screens[definition.name] = replacement
         if (!save()) {
             screens[definition.name] = old
@@ -134,17 +175,6 @@ object ScreenManager {
         return true
     }
 
-    fun play(
-        screen: ManagedScreen,
-        url: String,
-        label: String = url,
-        subtitleUrl: String = "",
-        audioLanguage: String = "",
-    ) {
-        screen.playback.play(url, label, subtitleUrl, audioLanguage)
-        broadcast(screen)
-    }
-
     fun load(
         screen: ManagedScreen,
         url: String,
@@ -156,13 +186,22 @@ object ScreenManager {
         screen.playback.load(url, label, subtitleUrl, audioLanguage)
         screen.loaderUuid = loaderUuid
         screen.readyNotified = false
+        screen.autoStartWhenReady = false
+        screen.readyClients.clear()
+        screen.awaitingReady.clear()
+        eligibleViewers(screen).mapTo(screen.awaitingReady) { it.uuid }
         broadcast(screen)
     }
 
     /** Starts a LOADED screen (or resumes a PAUSED one). */
-    fun start(screen: ManagedScreen) {
+    fun start(screen: ManagedScreen): Boolean {
+        if (screen.playback.state == PlayState.LOADED && !screen.readyNotified) return false
+        screen.autoStartWhenReady = false
+        screen.awaitingReady.clear()
+        screen.readyClients.clear()
         screen.playback.resume()
         broadcast(screen)
+        return true
     }
 
     fun seek(screen: ManagedScreen, toMs: Long) {
@@ -178,16 +217,12 @@ object ScreenManager {
         if (screen.playback.state != PlayState.LOADED ||
             screen.readyNotified
         ) return
-        screen.readyNotified = true
         val reporterName = platform?.player(reporterUuid)?.name ?: "a viewer"
-        val loader = screen.loaderUuid?.let { uuid -> platform?.player(uuid) }
-        val message =
-            "'${screen.playback.label}' is buffered on $reporterName's client — /pm play $screenName to roll."
-        if (loader != null) {
-            loader.sendChat(message)
-        } else {
-            PremiereCore.LOGGER.info("Screen '{}' buffered on {}'s client", screenName, reporterName)
-        }
+        screen.readyClients += reporterUuid
+        screen.awaitingReady -= reporterUuid
+        pruneUnavailableViewers(screen)
+        if (screen.awaitingReady.isNotEmpty()) return
+        finishPreparing(screen, reporterName)
     }
 
     /** Returns true if now playing, false if now paused. */
@@ -199,6 +234,10 @@ object ScreenManager {
     }
 
     fun stop(screen: ManagedScreen) {
+        screen.autoStartWhenReady = false
+        screen.readyNotified = false
+        screen.awaitingReady.clear()
+        screen.readyClients.clear()
         screen.playback.stop()
         broadcast(screen)
     }
@@ -206,6 +245,90 @@ object ScreenManager {
     fun setVolume(screen: ManagedScreen, volume: Float) {
         screen.playback.volume = volume
         broadcast(screen)
+    }
+
+    fun enqueue(screen: ManagedScreen, media: QueuedMedia): Int {
+        screen.queue.addLast(media)
+        return screen.queue.size
+    }
+
+    fun removeQueued(screen: ManagedScreen, index: Int): QueuedMedia? {
+        if (index !in 0 until screen.queue.size) return null
+        val iterator = screen.queue.iterator()
+        repeat(index) { iterator.next() }
+        val removed = iterator.next()
+        iterator.remove()
+        return removed
+    }
+
+    fun clearQueue(screen: ManagedScreen): Int {
+        val removed = screen.queue.size
+        screen.queue.clear()
+        return removed
+    }
+
+    /** Loads the next queued movie and rolls only after the audience is ready. */
+    fun loadNext(screen: ManagedScreen, loaderUuid: UUID? = null): Boolean {
+        val next = screen.queue.pollFirst() ?: return false
+        load(screen, next.url, next.label, next.subtitleUrl, next.audioLanguage, loaderUuid)
+        screen.autoStartWhenReady = true
+        return true
+    }
+
+    private fun finishPreparing(screen: ManagedScreen, reporterName: String?) {
+        if (screen.playback.state != PlayState.LOADED || screen.readyNotified) return
+        screen.readyNotified = true
+        if (screen.autoStartWhenReady) {
+            PremiereCore.LOGGER.info(
+                "Screen '{}' finished buffering '{}' for {} viewer(s); rolling queued playback",
+                screen.definition.name,
+                screen.playback.label,
+                screen.readyClients.size,
+            )
+            start(screen)
+            return
+        }
+        val loader = screen.loaderUuid?.let { uuid -> platform?.player(uuid) }
+        val readyOn = if (screen.readyClients.size > 1) "${screen.readyClients.size} viewers" else reporterName ?: "a viewer"
+        if (loader != null) {
+            loader.sendLoadReady(screen.playback.label, readyOn, screen.definition.name)
+        } else {
+            PremiereCore.LOGGER.info("Screen '{}' buffered for {}", screen.definition.name, readyOn)
+        }
+    }
+
+    private fun eligibleViewers(screen: ManagedScreen): List<dev.zephbyte.premiere.platform.PlayerHandle> {
+        return platform?.onlinePlayers().orEmpty().filter { isEligibleViewer(screen, it) }
+    }
+
+    private fun isEligibleViewer(
+        screen: ManagedScreen,
+        player: dev.zephbyte.premiere.platform.PlayerHandle,
+    ): Boolean {
+        val range = maxOf(CLIENT_ACTIVATION_DISTANCE, PremiereConfig.audioDistance.toDouble())
+        return player.canReceiveScreenState &&
+            player.dimension == screen.definition.dimension &&
+            player.position.distanceSqrTo(screen.definition.faceCenter()) <= range * range
+    }
+
+    private fun pruneUnavailableViewers(screen: ManagedScreen) {
+        val eligible = eligibleViewers(screen).mapTo(mutableSetOf()) { it.uuid }
+        screen.awaitingReady.retainAll(eligible)
+    }
+
+    /** Persists a per-screen audience radius, or null to follow the config default. */
+    fun setAudioFullVolumeRadius(screen: ManagedScreen, radius: Float?): Boolean {
+        require(radius == null || radius.isFinite() && radius >= 0f && radius < PremiereConfig.audioDistance) {
+            "Audience radius must be at least 0 and less than audio_distance (${PremiereConfig.audioDistance})"
+        }
+        val previous = screen.audioFullVolumeRadiusOverride
+        screen.audioFullVolumeRadiusOverride = radius
+        if (!save()) {
+            screen.audioFullVolumeRadiusOverride = previous
+            return false
+        }
+        broadcast(screen)
+        return true
     }
 
     /** Plain-types snapshot of one screen for the staff dashboard. */
@@ -218,10 +341,17 @@ object ScreenManager {
         /** Authorized dashboard preview source; never written to logs or HTML. */
         val url: String,
         val generation: Int,
+        val ready: Boolean,
         val positionMs: Long,
         val durationMs: Long,
         val volumePercent: Int,
+        val audioDistance: Float,
+        val audioFullVolumeRadius: Float,
+        val audioFullVolumeRadiusIsDefault: Boolean,
+        val queue: List<QueueStatus>,
     )
+
+    data class QueueStatus(val label: String)
 
     /**
      * Dashboard snapshot, completed on the server thread so HTTP threads never
@@ -243,9 +373,14 @@ object ScreenManager {
                     label = p.label,
                     url = p.url,
                     generation = p.generation,
+                    ready = screen.readyNotified,
                     positionMs = p.currentPositionMs(),
                     durationMs = p.durationMs,
                     volumePercent = (p.volume * 100).toInt(),
+                    audioDistance = PremiereConfig.audioDistance,
+                    audioFullVolumeRadius = screen.effectiveAudioFullVolumeRadius(),
+                    audioFullVolumeRadiusIsDefault = screen.audioFullVolumeRadiusOverride == null,
+                    queue = screen.queue.map { QueueStatus(it.label) },
                 )
             })
         }
@@ -260,7 +395,17 @@ object ScreenManager {
      */
     fun sendAllTo(playerUuid: UUID) {
         val player = platform?.player(playerUuid) ?: return
-        screens.values.forEach { player.sendScreenState(messageFor(it)) }
+        screens.values.forEach { screen ->
+            if (screen.playback.state == PlayState.LOADED &&
+                !screen.readyNotified &&
+                isEligibleViewer(screen, player)
+            ) {
+                // A viewer who joins during preparation belongs to the same
+                // readiness barrier as everyone online at load time.
+                screen.awaitingReady += player.uuid
+            }
+            player.sendScreenState(messageFor(screen))
+        }
     }
 
     private fun broadcast(screen: ManagedScreen) {
@@ -285,6 +430,7 @@ object ScreenManager {
             subtitleUrl = playback.subtitleUrl,
             audioLanguage = playback.audioLanguage.ifBlank { PremiereConfig.audioLanguage },
             audioDistance = PremiereConfig.audioDistance,
+            audioFullVolumeRadius = screen.effectiveAudioFullVolumeRadius(),
             state = playback.state,
             generation = playback.generation,
             mediaPositionMs = playback.currentPositionMs(),
@@ -312,7 +458,12 @@ object ScreenManager {
                     height = o["height"].asInt,
                     facing = ScreenFacing.byName(o["facing"].asString) ?: ScreenFacing.NORTH,
                 )
-                screens[definition.name] = ManagedScreen(definition)
+                val radius = o["audio_full_volume_radius"]?.let { value ->
+                    runCatching { value.asFloat }
+                        .getOrNull()
+                        ?.takeIf { it.isFinite() && it >= 0f }
+                }
+                screens[definition.name] = ManagedScreen(definition, radius)
             }
             PremiereCore.LOGGER.info("Loaded {} screen(s)", screens.size)
         } catch (e: Exception) {
@@ -334,6 +485,9 @@ object ScreenManager {
                 addProperty("width", d.width)
                 addProperty("height", d.height)
                 addProperty("facing", d.facing.serializedName)
+                screen.audioFullVolumeRadiusOverride?.let {
+                    addProperty("audio_full_volume_radius", it)
+                }
             })
         }
         val root = JsonObject().apply { add("screens", array) }

@@ -15,5 +15,11 @@ First public beta of Premiere: an in-world movie theater for Minecraft 26.2.
   clearer wording, click-to-run movie commands, and a clickable private
   dashboard link. LAN links are detected automatically; remote deployments can
   use their configured HTTPS proxy or tunnel URL.
+- Truly positional screen audio (spatial stereo when supported, mono fallback),
+  with a persistent per-screen full-volume audience zone, a configurable
+  server default, and smooth falloff to the outer audible radius.
+- Per-screen playback queues in commands and the dashboard pre-buffer each
+  movie before automatically rolling it, and portrait dashboard previews
+  remain fully visible. Direct movie selection now always loads first.
 - Fully vanilla clients are never kicked and never receive anything they can't
   handle; they just see the wall.

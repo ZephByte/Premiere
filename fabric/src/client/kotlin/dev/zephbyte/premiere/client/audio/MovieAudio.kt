@@ -1,9 +1,11 @@
 package dev.zephbyte.premiere.client.audio
 
 import org.slf4j.LoggerFactory
+import org.lwjgl.openal.AL
 import org.lwjgl.openal.AL10
 import org.lwjgl.openal.AL11
 import org.lwjgl.openal.ALC10
+import org.lwjgl.openal.SOFTSourceSpatialize
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.ArrayDeque
@@ -12,7 +14,10 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * One screen's soundtrack: a positional OpenAL streaming source on the
- * client, fed 48kHz stereo PCM by the video decoder. PCM retains its media
+ * client, fed 48kHz stereo PCM by the video decoder. OpenAL Soft's explicit
+ * spatial-stereo mode preserves both channels when available; other backends
+ * fall back to mono because ordinary stereo OpenAL sources ignore position.
+ * PCM retains its media
  * timestamp so catch-up and post-seek audio that is already behind the master
  * clock can be discarded instead of being played late.
  *
@@ -70,6 +75,10 @@ class MovieAudio(
     @Volatile
     private var volume = 1f
 
+    /** Audience-zone attenuation, calculated on the Minecraft client tick. */
+    @Volatile
+    private var distanceGain = 0f
+
     @Volatile
     private var flushRequested = false
 
@@ -114,6 +123,10 @@ class MovieAudio(
         volume = value.coerceIn(0f, 1f)
     }
 
+    fun setDistanceGain(value: Float) {
+        distanceGain = value.coerceIn(0f, 1f)
+    }
+
     /** Seek: throw away everything buffered; the stale-drop realigns. */
     fun flush() {
         LOGGER.info(
@@ -149,6 +162,7 @@ class MovieAudio(
     private var lastContextWarningMs = 0L
     private var lastSourceState = Int.MIN_VALUE
     private var lastSourceStateLogMs = 0L
+    private var spatialStereo = false
 
     private fun runLoop() {
         try {
@@ -196,9 +210,20 @@ class MovieAudio(
             return false
         }
         AL10.alSource3f(newSource, AL10.AL_POSITION, x, y, z)
-        AL10.alSourcef(newSource, AL10.AL_REFERENCE_DISTANCE, 4f)
+        // Gain falloff is audience-shaped rather than OpenAL's spherical
+        // model. Keep positioning/panning, but apply attenuation ourselves.
+        AL10.alSourcef(newSource, AL10.AL_REFERENCE_DISTANCE, 1f)
         AL10.alSourcef(newSource, AL10.AL_MAX_DISTANCE, maxDistance)
-        AL10.alSourcef(newSource, AL10.AL_ROLLOFF_FACTOR, 1f)
+        AL10.alSourcef(newSource, AL10.AL_ROLLOFF_FACTOR, 0f)
+        spatialStereo = runCatching {
+            if (!AL.getCapabilities().AL_SOFT_source_spatialize) return@runCatching false
+            AL10.alSourcei(
+                newSource,
+                SOFTSourceSpatialize.AL_SOURCE_SPATIALIZE_SOFT,
+                AL10.AL_TRUE,
+            )
+            AL10.alGetError() == AL10.AL_NO_ERROR
+        }.getOrDefault(false)
 
         source = newSource
         buffers = newBuffers
@@ -207,11 +232,12 @@ class MovieAudio(
         boundContext = context
         errorStreak = 0
         LOGGER.info(
-            "Premiere audio diag [{}] source created id={} context={} buffers={} position=({}, {}, {}) maxDistance={}",
+            "Premiere audio diag [{}] source created id={} context={} buffers={} format={} position=({}, {}, {}) maxDistance={}",
             debugName,
             source,
             java.lang.Long.toHexString(boundContext),
             buffers.size,
+            if (spatialStereo) "stereo-spatialized" else "mono-fallback",
             x,
             y,
             z,
@@ -232,11 +258,16 @@ class MovieAudio(
         buffers = IntArray(0)
         free.clear()
         queuedTimeline.clear()
+        spatialStereo = false
     }
 
     private fun pump() {
         AL10.alGetError() // don't inherit other threads' context-global errors
-        AL10.alSourcef(source, AL10.AL_GAIN, (volume * localVolume()).coerceIn(0f, 1f))
+        AL10.alSourcef(
+            source,
+            AL10.AL_GAIN,
+            (volume * localVolume() * distanceGain).coerceIn(0f, 1f),
+        )
 
         if (flushRequested) {
             flushRequested = false
@@ -304,17 +335,34 @@ class MovieAudio(
                     chunk.timestampMs <= alignedClock() + START_EARLY_TOLERANCE_MS
                 if (!contiguous || (tail == null && !dueAsNewRun)) break
                 queue.poll()
-                val bytes = chunk.pcm.size * 2
+                val frames = chunk.pcm.size / 2
+                val bytes = if (spatialStereo) chunk.pcm.size * 2 else frames * 2
                 var buffer = scratch
                 if (buffer == null || buffer.capacity() < bytes) {
                     buffer = ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())
                     scratch = buffer
                 }
                 buffer.clear()
-                buffer.asShortBuffer().put(chunk.pcm)
+                val samples = buffer.asShortBuffer()
+                if (spatialStereo) {
+                    samples.put(chunk.pcm)
+                } else {
+                    // Fallback backends only spatialize mono. Average each
+                    // L/R frame while preserving the same media duration.
+                    for (frame in 0 until frames) {
+                        val left = chunk.pcm[frame * 2].toInt()
+                        val right = chunk.pcm[frame * 2 + 1].toInt()
+                        samples.put(((left + right) / 2).toShort())
+                    }
+                }
                 buffer.limit(bytes)
                 val alBuffer = free.poll()
-                AL10.alBufferData(alBuffer, AL10.AL_FORMAT_STEREO16, buffer, SAMPLE_RATE)
+                AL10.alBufferData(
+                    alBuffer,
+                    if (spatialStereo) AL10.AL_FORMAT_STEREO16 else AL10.AL_FORMAT_MONO16,
+                    buffer,
+                    SAMPLE_RATE,
+                )
                 AL10.alSourceQueueBuffers(source, alBuffer)
                 queuedTimeline.add(QueuedBuffer(alBuffer, chunk.timestampMs, chunk.durationMs))
                 fedChunks.incrementAndGet()
@@ -399,10 +447,13 @@ class MovieAudio(
         val visibleClock = videoClock()
         val latest = latestTimestampMs.get()
         LOGGER.info(
-            "Premiere audio diag [{}] state={} paused={} rawClock={}ms audioClock={}ms videoClock={}ms outputMedia={}ms outputVsAudio={}ms outputVsVideo={}ms sourceOffset={}ms latestPcm={}ms pcmLead={}ms fifo={}/{} alQueued={} alProcessed={} free={} +enqueued={} +fed={} +staleIn={} +staleFeed={} +backpressure={}",
+            "Premiere audio diag [{}] state={} paused={} gain={} sourceVolume={} localVolume={} rawClock={}ms audioClock={}ms videoClock={}ms outputMedia={}ms outputVsAudio={}ms outputVsVideo={}ms sourceOffset={}ms latestPcm={}ms pcmLead={}ms fifo={}/{} alQueued={} alProcessed={} free={} +enqueued={} +fed={} +staleIn={} +staleFeed={} +backpressure={}",
             debugName,
             sourceStateName(state),
             paused,
+            distanceGain,
+            volume,
+            localVolume(),
             rawClock,
             audioClock,
             visibleClock,

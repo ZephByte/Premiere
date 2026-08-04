@@ -1,8 +1,8 @@
 # Premiere
 
 An in-world movie theater for **Fabric and Paper servers**. Staff upload a
-movie through a drag-and-drop page and play it by name
-(`/pm play theater big_buck_bunny`); players who installed the client mod see
+movie through a drag-and-drop page and load it by name
+(`/pm load theater big_buck_bunny`, then `/pm play theater`); players who installed the client mod see
 the film on an ordinary block wall and hear the soundtrack positionally
 through the mod's own audio engine — decoded on their machine from the same
 stream as the picture, so lips and voices cannot drift apart.
@@ -32,7 +32,7 @@ only mandatory piece, and only on the server.
 ## Setting up the server
 
 The full checklist, in order. Steps 1–2 get you a working theater; steps
-3–4 add the movie library (uploads + play-by-name).
+3–4 add the movie library (uploads + load-by-name).
 
 1. **Fabric:** drop the Premiere jar in the server's `mods` folder (requires
    Fabric API and Fabric Language Kotlin, like the client). First boot writes
@@ -53,7 +53,7 @@ The full checklist, in order. Steps 1–2 get you a working theater; steps
    or tunnel in front of 8477 and set `upload_public_address` to its public URL.
 
 Without steps 3–4 the mod still works — staff just paste direct URLs into
-`/pm play` instead of using names and uploads.
+`/pm load` instead of using names and uploads.
 
 ## Hosting the movie file
 
@@ -71,8 +71,8 @@ After the one-time setup below, nobody touches a dashboard or a URL again:
    clickable private dashboard link (valid for one hour and gated by the same
    permission as `play`).
 2. Open it, **name the movie** (e.g. `intro_joke`), drop the `.mp4`.
-3. Showtime: `/pm play theater intro_joke` — names tab-complete, and
-   `/pm movies` lists the library.
+3. Showtime: `/pm load theater intro_joke`, wait for the ready ping, then
+   `/pm play theater` — names tab-complete, and `/pm movies` lists the library.
 
 The upload page is served by the Minecraft server on a small HTTP port, but
 file bytes go **straight from the browser to the bucket** via a presigned
@@ -177,7 +177,7 @@ the free tier is measured in GB. Small pre-roll clips can stay.
 
 ### Direct URLs still work
 
-`/pm play <screen> https://...` with any public direct-file URL
+`/pm load <screen> https://...` with any public direct-file URL
 bypasses the library entirely — useful for testing or if you host elsewhere:
 
 1. Upload the movie to an object-storage bucket via the provider's dashboard.
@@ -211,11 +211,13 @@ The old `movienight.control` node remains a deprecated compatibility alias.
 /pm undefine <screen>                        remove a screen
 /pm load [screen] <movie|url>                pre-buffer; you get a ping when it's ready
 /pm play [screen]                            roll a loaded film (or resume a paused one)
-/pm play [screen] <movie|url> [--audio xx]   load and start immediately
+/pm queue [screen] [movie|url] [--audio xx]  show the queue or add a movie to play next
+/pm queue [screen] remove <number> | clear    remove one queued movie or clear the queue
 /pm pause [screen]                           pause / resume (toggle)
 /pm seek [screen] <time>                     1:23:45, 5:30, 90, +30, -1:30
 /pm stop [screen]                            stop and clear
 /pm volume [screen] <0-100>                  audio volume at the source
+/pm radius [screen] [blocks|default]         view, set, or reset the full-volume audience radius
 /pm dashboard | dash                         dashboard link (control panel, library, uploads)
 /pm movies                                   list the movie library
 /pm reload                                   hot-reload config/premiere.json
@@ -254,10 +256,22 @@ voices before lips → decrease. Most wired setups should need ~0. The same
 settings screen also has a per-player movie volume, independent of the
 staff-controlled source volume.
 
-Server-side audio settings in `config/premiere.json`: `audio_distance`
-(audible radius in blocks, default 48) and `audio_language` (preferred track
-for multi-audio films, e.g. "eng"; per-film override: `--audio jpn` on
-play/load).
+Server-side audio settings in `config/premiere.json`:
+
+- `audio_full_volume_radius` — default audience-facing full-volume radius in
+  blocks (default 16). Each screen can override it with `/pm radius <screen>
+  <blocks>` or the dashboard, then return to this default with `/pm radius
+  <screen> default`. The radius forms a half-sphere in front of the screen;
+  behind the screen, attenuation begins immediately.
+- `audio_distance` — outer radius where the soundtrack reaches silence
+  (default 48). Between the two radii, volume falls smoothly with distance.
+- `audio_language` — preferred track for multi-audio films, e.g. `"eng"`;
+  per-film override: `--audio jpn` on play/load.
+
+The client uses OpenAL Soft's spatial-stereo mode when available, preserving
+both movie channels while placing them at the screen. Other backends fall back
+to a positional mono mix. Staff source volume, player movie volume, and
+distance attenuation are applied independently.
 
 ## Tech notes
 

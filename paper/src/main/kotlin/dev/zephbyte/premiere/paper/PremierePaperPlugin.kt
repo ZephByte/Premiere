@@ -30,8 +30,14 @@ class PremierePaperPlugin : JavaPlugin() {
 
         server.pluginManager.registerEvents(SelectionListener, this)
 
-        val ticks = ScreenManager.REBROADCAST_TICKS.toLong()
-        server.scheduler.runTaskTimer(this, Runnable { ScreenManager.rebroadcastPlaying() }, ticks, ticks)
+        server.scheduler.runTaskTimer(this, Runnable { ScreenManager.tick() }, 1L, 1L)
+        val rebroadcastTicks = ScreenManager.REBROADCAST_TICKS.toLong()
+        server.scheduler.runTaskTimer(
+            this,
+            Runnable { ScreenManager.rebroadcastPlaying() },
+            rebroadcastTicks,
+            rebroadcastTicks,
+        )
 
         PremiereCore.LOGGER.info("Premiere (Paper) enabled — vanilla clients unaffected, modded clients get the show")
     }

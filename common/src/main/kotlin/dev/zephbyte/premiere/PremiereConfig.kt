@@ -10,14 +10,20 @@ import java.nio.file.Path
  */
 object PremiereConfig {
 
+    private const val DEFAULT_AUDIO_FULL_VOLUME_RADIUS = 16f
+
     /** Audible radius (blocks) of a screen's audio channel. */
     var audioDistance: Float = 48f
+        private set
+
+    /** Full-volume audience radius in front of the screen, in blocks. */
+    var audioFullVolumeRadius: Float = DEFAULT_AUDIO_FULL_VOLUME_RADIUS
         private set
 
     /**
      * Preferred audio track language for multi-audio films (ISO 639 as
      * releases tag it: "eng", "jpn", ...). Blank keeps the file's default
-     * track. Overridable per film: /pm play <screen> <movie> --audio jpn
+     * track. Overridable per film: /pm load <screen> <movie> --audio jpn
      */
     var audioLanguage: String = ""
         private set
@@ -70,6 +76,7 @@ object PremiereConfig {
         }
 
         val previousAudioDistance = audioDistance
+        val previousAudioFullVolumeRadius = audioFullVolumeRadius
         val previousAudioLanguage = audioLanguage
         val previousUploadHttpPort = uploadHttpPort
         val previousUploadPublicAddress = uploadPublicAddress
@@ -79,6 +86,7 @@ object PremiereConfig {
         val previousR2SecretAccessKey = r2SecretAccessKey
 
         var nextAudioDistance = previousAudioDistance
+        var nextAudioFullVolumeRadius = previousAudioFullVolumeRadius
         var nextAudioLanguage = previousAudioLanguage
         var nextUploadHttpPort = previousUploadHttpPort
         var nextUploadPublicAddress = previousUploadPublicAddress
@@ -86,10 +94,15 @@ object PremiereConfig {
         var nextR2Bucket = previousR2Bucket
         var nextR2AccessKeyId = previousR2AccessKeyId
         var nextR2SecretAccessKey = previousR2SecretAccessKey
+        var audioFullVolumeRadiusConfigured = false
 
         try {
             objectFromDisk?.let { o ->
                 o["audio_distance"]?.let { nextAudioDistance = it.asFloat }
+                o["audio_full_volume_radius"]?.let {
+                    nextAudioFullVolumeRadius = it.asFloat
+                    audioFullVolumeRadiusConfigured = true
+                }
                 o["audio_language"]?.let { nextAudioLanguage = it.asString.lowercase().trim() }
                 o["upload_http_port"]?.let { nextUploadHttpPort = it.asInt }
                 o["upload_public_address"]?.let { nextUploadPublicAddress = it.asString.trimEnd('/') }
@@ -98,8 +111,21 @@ object PremiereConfig {
                 o["r2_access_key_id"]?.let { nextR2AccessKeyId = it.asString.trim() }
                 o["r2_secret_access_key"]?.let { nextR2SecretAccessKey = it.asString.trim() }
             }
+            // Upgrade configs written before this setting existed without
+            // rejecting servers whose outer audio radius is under 16 blocks.
+            if (objectFromDisk != null && !audioFullVolumeRadiusConfigured) {
+                nextAudioFullVolumeRadius = minOf(
+                    DEFAULT_AUDIO_FULL_VOLUME_RADIUS,
+                    nextAudioDistance / 3f,
+                )
+            }
             require(nextAudioDistance.isFinite() && nextAudioDistance > 0f) {
                 "audio_distance must be a positive finite number"
+            }
+            require(nextAudioFullVolumeRadius.isFinite() &&
+                nextAudioFullVolumeRadius >= 0f && nextAudioFullVolumeRadius < nextAudioDistance
+            ) {
+                "audio_full_volume_radius must be at least 0 and less than audio_distance"
             }
             require(nextUploadHttpPort in 1..65535) {
                 "upload_http_port must be between 1 and 65535"
@@ -119,6 +145,7 @@ object PremiereConfig {
         }
 
         audioDistance = nextAudioDistance
+        audioFullVolumeRadius = nextAudioFullVolumeRadius
         audioLanguage = nextAudioLanguage
         uploadHttpPort = nextUploadHttpPort
         uploadPublicAddress = nextUploadPublicAddress
@@ -129,6 +156,7 @@ object PremiereConfig {
         if (save()) return true
 
         audioDistance = previousAudioDistance
+        audioFullVolumeRadius = previousAudioFullVolumeRadius
         audioLanguage = previousAudioLanguage
         uploadHttpPort = previousUploadHttpPort
         uploadPublicAddress = previousUploadPublicAddress
@@ -141,6 +169,7 @@ object PremiereConfig {
 
     private fun save(): Boolean = JsonConfig.write(path()) {
         addProperty("audio_distance", audioDistance)
+        addProperty("audio_full_volume_radius", audioFullVolumeRadius)
         addProperty("audio_language", audioLanguage)
         addProperty("upload_http_port", uploadHttpPort)
         addProperty("upload_public_address", uploadPublicAddress)

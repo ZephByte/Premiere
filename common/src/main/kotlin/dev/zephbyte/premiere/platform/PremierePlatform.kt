@@ -41,6 +41,16 @@ interface PlayerHandle {
 
     fun sendChat(text: String)
 
+    /**
+     * Tells the staff member who loaded a movie that a client is ready.
+     * Platforms override this to provide their native styled, clickable
+     * command component; the text fallback keeps lightweight test handles
+     * and future platform ports source-compatible.
+     */
+    fun sendLoadReady(mediaLabel: String, reporterName: String, screenName: String) {
+        sendChat("'$mediaLabel' is ready on $screenName. Buffered by $reporterName. Run /pm play $screenName to roll.")
+    }
+
     fun sendActionBar(text: String)
 
     fun hasControlPermission(): Boolean

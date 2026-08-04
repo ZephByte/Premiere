@@ -28,7 +28,7 @@ class ConfirmTracker(private val windowMs: Long = 30_000L) {
     }
 }
 
-/** Argument parsing shared by /pm play and /pm load on both platforms. */
+/** Media argument parsing used by /pm load and /pm queue on both platforms. */
 object PlayArgs {
     private val AUDIO_FLAG = Regex("""\s+--audio\s+([A-Za-z]{2,3})\s*$""")
 

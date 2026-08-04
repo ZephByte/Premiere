@@ -173,6 +173,8 @@ class VideoPlayer(
 
     fun setVolume(value: Float) = audio.setVolume(value)
 
+    fun setDistanceGain(value: Float) = audio.setDistanceGain(value)
+
     fun hasEmbeddedSubtitles(): Boolean = subtitles.any()
 
     fun availableSubtitleLanguages(): List<String> = subtitles.availableLanguages()
@@ -306,19 +308,15 @@ class VideoPlayer(
                     audio.flush()
                     grabber.setTimestamp(demuxTarget * 1000, true)
                     lastTsMs = demuxTarget
+                    lastAudioTsMs = -1L
                     appliedTrimMs = requestedTrimMs
                     lastSeekAtMs = diagnosticNow
                 }
-                // JavaCV's processing flag covers samples as well as images.
-                // The old skim disabled it and silently discarded PCM. When
-                // the whole demuxer is behind, request processed audio only;
-                // JavaCV skips expensive video conversion until the audio
-                // cursor reaches the picture target, then normal A/V grabbing
-                // resumes at the next frame. If audio is already current, a
-                // slightly old video timestamp alone must not trigger a skim.
-                val demuxCursorMs = max(lastTsMs, lastAudioTsMs)
-                val audioOnlyCatchUp = hasAudio && target - demuxCursorMs > DROP_BEHIND_MS
-                val frame = grabber.grabFrame(true, !audioOnlyCatchUp, true, false, wantSubtitles)
+                // Always decode compressed video packets, even while catching
+                // up. Dropping those packets breaks the reference chain for
+                // P/B frames and produces corruption until the next keyframe.
+                // Stale decoded pictures are discarded below instead.
+                val frame = grabber.grabFrame(true, true, true, false, wantSubtitles)
                 if (frame == null) {
                     val now = System.currentTimeMillis()
                     if (now - eofLogAtMs >= 5_000) {

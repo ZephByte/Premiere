@@ -41,6 +41,7 @@ class Premiere : ModInitializer {
         }
         var tickCounter = 0
         ServerTickEvents.END_SERVER_TICK.register { _ ->
+            ScreenManager.tick()
             if (++tickCounter >= ScreenManager.REBROADCAST_TICKS) {
                 tickCounter = 0
                 ScreenManager.rebroadcastPlaying()
